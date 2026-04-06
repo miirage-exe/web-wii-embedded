@@ -1,0 +1,179 @@
+\documentclass[12pt, a4paper]{article}
+
+% Packages
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[a4paper, margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=blue
+}
+
+\lstset{
+    language=C++,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{gray}\itshape,
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    frame=single,
+    breaklines=true,
+    captionpos=b
+}
+
+\title{SEES Project - Web Wii}
+\author{Mika Baëza, Kawtar Bidoukhach, Mohammad Parto}
+\date{April 2026}
+
+
+\begin{document}
+
+
+\maketitle
+
+\tableofcontents
+
+\section{Introduction} 
+
+In 2006, Nintendo introduced its new console to the public: the Nintendo Wii. At the time, this game console was a breakthrough due to the specificity of its controller, the \textit{Wii Remote}. The particularity of this remote is its ability to act as an intuitive pointing device. The Wii Remote can be seen as a laser pointer, except that the position it points to on screen becomes a cursor, allowing users to interact with on-screen elements in a natural and intuitive way.
+
+% Beyond pointing, the Wii Remote also captures the player's physical gestures through motion sensing, translating real-world movements into in-game actions. This combination of pointing and motion sensing defined a new paradigm for human-computer interaction in consumer electronics.
+
+In this project, we aimed to recreate this intuitive device using modern embedded hardware. The system consists of one Adafruit Metro ESP32-S3 boards communicating over Bluetooth Low Energy (BLE) to a webpage opened on a PC.
+
+This report describes the system architecture, hardware design, sensor modelling, firmware implementation, and experimental results of this project.
+
+\section{Background}
+
+\subsection{The Original Wii Remote}
+
+% TODO: Brief description of how the original Wii Remote works — IR sensor bar,
+% MotionPlus gyroscope, accelerometer, and how Nintendo combined them.
+% Reference the original hardware if available.
+
+\subsection{Bluetooth Low Energy (BLE)}
+
+% TODO: Explain the GATT model, peripheral/central roles, notifications vs. polling.
+% Explain why BLE was chosen over Wi-Fi for this application (latency, power).
+
+\subsection{Inertial Measurement Units and Sensor Fusion}
+
+% TODO: Explain IMU basics (accelerometer, gyroscope, magnetometer).
+% Introduce the problem of yaw drift and why a magnetometer solves it.
+% Explain what sensor fusion is and mention the Kalman/complementary filter,
+% and why the BNO085's onboard fusion removes the need to implement one manually.
+
+\subsection{IR-Based Pointing and Perspective Projection}
+
+% TODO: Explain how an IR camera produces a 2D projection of 3D space.
+% Introduce the concept of perspective projection and its limitations
+% (loss of depth). Motivate the use of a single IR LED as a screen anchor.
+
+
+
+\section{Description}
+
+
+
+\subsection{System Architecture}
+
+The system is composed of one ESP32-S3 boards exclusively over BLE with a web page, and a reference device placed on top of the screen.
+
+\paragraph{Remote board} The handheld unit is battery-powered and hosts a BNO085 IMU (UART) for orientation sensing, an IR Camera which tracks the IR LEDs on the reference device to extract cursor coordinates, and several tactile buttons. It acts as a BLE \textit{peripheral} (forwarding data to the PC) at maximum 50\,Hz.
+
+\paragraph{Reference device} The reference device is USB-powered and hosts two IR leds separated of 20cm,  It does not contain any internal logic and is just used as a reference line for the remote IR camera. 
+Figure~\ref{fig:architecture} shows the overall system block diagram.
+
+\paragraph{Web page} For this project, we decided to work with a web page. Since Chrome [...] we decided used the web bluetooth API to connect the web page to the remote. 
+Figure~\ref{fig:architecture} shows the overall system block diagram.
+
+\begin{figure}[H]
+    \centering
+    % \includegraphics[width=0.85\textwidth]{figures/architecture.png}
+    \fbox{\parbox{0.85\textwidth}{\centering\vspace{2cm}[Block diagram placeholder]\vspace{2cm}}}
+    \caption{System architecture: Remote $\xrightarrow{\text{BLE}}$ PC}
+    \label{fig:architecture}
+\end{figure}
+
+
+
+\subsection{Hardware Design}
+
+
+
+\subsection{Sensor Modelling and Cursor Estimation}
+
+
+
+\subsection{BLE Communication Protocol}
+
+The remote transmits a 7-byte packet to the console at $\sim$50\,Hz:
+
+\begin{lstlisting}[caption={BLE packet structure (remote $\to$ console)}, label={lst:packet}]
+struct RemotePacket {
+    int32_t pitch;    // degrees * 100  (4 bytes)
+    int32_t roll;     // degrees * 100  (4 bytes)
+    int32_t yaw;      // degrees * 100  (4 bytes)
+    uint8_t buttons;  // bitmask        (1 byte)
+};                    // Total: 13 bytes
+\end{lstlisting}
+
+
+
+\subsection{Firmware Design}
+
+
+
+\section{Experimental Results and Testing}
+
+
+
+\section{Discussion and Conclusion}
+
+
+
+\subsection{Limitations and Trade-offs}
+
+
+
+\subsection{Conclusion}
+
+
+
+\section{References}
+
+\bibitem{wiibrew}
+Wiibrew, \textit{Wiimote wiki}.
+\url{https://wiibrew.org/wiki/Wiimote}
+
+\bibitem{web_bluetooth}
+MDN Web Docs, \textit{Web Bluetooth API}.
+\url{https://developer.mozilla.org/en-US/docs/Web/API/Web_Bluetooth_API}
+
+\bibitem{bno085}
+Adafruit Industries, \textit{BNO085 Datasheet}, 2025.
+\url{https://cdn-learn.adafruit.com/downloads/pdf/adafruit-9-dof-orientation-imu-fusion-breakout-bno085.pdf}
+
+\bibitem{ir_camera}
+DFRobot, \textit{Gravity: IR Positioning Camera Datasheet}, 2025.
+\url{https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/2148/Positioning_IR_Camera_Web.pdf}
+
+\end{document}
