@@ -131,9 +131,15 @@ void initConsole() {
   pConsoleService->start();
 }
 
+void getIRledPosition() {
+  // TODO: get the position of the first led detected by the camera and update the irCameraPayload.
+  // For debugging, plot the x/y coordonates of the led position from the camera.
+  // If the camera does not detect the led, it should just keep the previous value. 
+}
+
 void notifyComputer() {
   if (pConsoleCharacteristic != nullptr) {
-    consolePayload.roll = (consolePayload.roll + (rand()%3 - 1))%360;
+    getIRledPosition();
     calculateCursorState();
     pConsoleCharacteristic->setValue((uint8_t*)&consolePayload, sizeof(consolePayload));
     pConsoleCharacteristic->notify();
