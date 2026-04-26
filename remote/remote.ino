@@ -3,6 +3,7 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include "Adafruit_BNO08x_RVC.h" // For gyroscope
 
 #include <cstdlib> // For using rand()
 
@@ -30,19 +31,6 @@ struct RemotePayload {
   uint8_t buttonMask = 0; // lowest bit (1) = button A, second bit (2) = button B 
 } remotePayload; 
 
-// Calculate the remote payload from the sensor data
-// This function is called each time before sending the remote payload to the console
-void getSensorData() {
-  remotePayload.pitch += (rand()%3-1);
-  remotePayload.yaw += (rand()%3-1);
-  remotePayload.roll += (rand()%3-1)*100;
-
-  // Button mask
-  uint8_t mask = 0;
-  if (digitalRead(BUTTON_A_PIN)) mask = mask | (1 << 0);
-  remotePayload.buttonMask = mask;
-}
-
 // --- Neopixel ------------------------------------------------
 
 Adafruit_NeoPixel pixels(1, PIN_NEOPIXEL); 
@@ -66,6 +54,56 @@ void updateLed() {
 void initPins() {
   pinMode(BUTTON_A_PIN, INPUT);
 }
+
+// --- Gyroscope (BNO085x) -------------------------------------
+
+#define BNO_RX 4  // ESP32-S3 pin connected to BNO08x TX
+#define BNO_TX 5  // ESP32-S3 pin connected to BNO08x RX (optional, RVC is one direction only)
+
+Adafruit_BNO08x_RVC rvc = Adafruit_BNO08x_RVC();
+
+void initGyroscope() {
+    // Wait for serial monitor to open
+    Serial.begin(115200);
+    while (!Serial)
+        delay(10);
+
+    Serial.println("Adafruit BNO08x IMU - UART-RVC mode");
+
+    Serial1.begin(115200); // This is the baud rate specified by the datasheet
+    while (!Serial1)
+        delay(10);
+
+    Serial1.begin(115200, SERIAL_8N1, BNO_RX, BNO_TX); // Define the pins we are using with the sensor
+
+    if (!rvc.begin(&Serial1)) { // connect to the sensor over hardware serial
+        Serial.println("Could not find BNO08x!");
+        while (1)
+            delay(10);
+    }
+
+    Serial.println("BNO08x found!");
+}
+
+// Calculate the remote payload from the sensor data
+// This function is called each time before sending the remote payload to the console
+void getSensorData() {
+  BNO08x_RVC_Data heading;
+
+  // Orientation informations (if sensor is available)
+  if (rvc.read(&heading)) {
+    remotePayload.pitch = heading.pitch; // Rotation around the 2 white connectors
+    remotePayload.yaw = heading.yaw; // Rotation around sensor plane normal (horizontal)
+    remotePayload.roll = heading.roll; // Rotation around the 2 pin edges
+  }
+
+
+  // Button mask
+  uint8_t mask = 0;
+  if (digitalRead(BUTTON_A_PIN)) mask = mask | (1 << 0);
+  remotePayload.buttonMask = mask;
+}
+
 
 // --- Console Connection -------------------------------------
 
