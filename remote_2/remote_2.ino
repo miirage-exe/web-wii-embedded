@@ -1,4 +1,5 @@
 #include <Adafruit_NeoPixel.h>
+#include <Wire.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -186,10 +187,89 @@ void setupButtons() {
 
 // === IR Camera =======================================================
 
-void setupIRCamera() { return; }
+int IRsensorAddress = 0xB0;
+//int IRsensorAddress = 0x58;
+int slaveAddress = IRsensorAddress >> 1;
+byte data_buf[16];
+
+int Ix[4];
+int Iy[4];
+int s;
+
+void Write_2bytes(byte d1, byte d2) {
+  Wire.beginTransmission(slaveAddress);
+  Wire.write(d1); Wire.write(d2);
+  Wire.endTransmission();
+}
+
+void setupIRCamera() {
+  slaveAddress = IRsensorAddress >> 1; // 0xB0 >> 1 = 0x58
+  Wire.begin();
+  // IR sensor initialize
+  Write_2bytes(0x30,0x01); delay(10);
+  Write_2bytes(0x30,0x08); delay(10);
+  Write_2bytes(0x06,0x90); delay(10);
+  Write_2bytes(0x08,0xC0); delay(10);
+  Write_2bytes(0x1A,0x40); delay(10);
+  Write_2bytes(0x33,0x33); delay(10); 
+}
 
 bool readIRCamera(IRCameraPayload& out) {
-  // TODO: real implementation
+  //IR sensor read
+  Wire.beginTransmission(slaveAddress);
+  Wire.write(0x36);
+  Wire.endTransmission();
+  Wire.requestFrom(slaveAddress, 16); // Request the 2 byte heading (MSB comes first)
+  for (int i=0;i<16;i++) { data_buf[i]=0; }
+  int i=0;
+  while(Wire.available() && i < 16) {
+    data_buf[i] = Wire.read();
+    i++;
+  }
+  Ix[0] = data_buf[1];
+  Iy[0] = data_buf[2];
+  s = data_buf[3];
+  Ix[0] += (s & 0x30) <<4;
+  Iy[0] += (s & 0xC0) <<2;
+  Ix[1] = data_buf[4];
+  Iy[1] = data_buf[5];
+  s = data_buf[6];
+  Ix[1] += (s & 0x30) <<4;
+  Iy[1] += (s & 0xC0) <<2;
+  Ix[2] = data_buf[7];
+  Iy[2] = data_buf[8];
+  s = data_buf[9];
+  Ix[2] += (s & 0x30) <<4;
+  Iy[2] += (s & 0xC0) <<2;
+  Ix[3] = data_buf[10];
+  Iy[3] = data_buf[11];
+  s = data_buf[12];
+  Ix[3] += (s & 0x30) <<4;
+  Iy[3] += (s & 0xC0) <<2;
+  for(i=0; i<4; i++)
+  {
+    if (Ix[i] < 1000)
+      Serial.print("");
+    if (Ix[i] < 100)
+      Serial.print("");
+    if (Ix[i] < 10)
+      Serial.print("");
+    
+    Serial.print( int(Ix[i]) );
+    Serial.print(",");
+    if (Iy[i] < 1000)
+      Serial.print("");
+    if (Iy[i] < 100)
+      Serial.print("");
+    if (Iy[i] < 10)
+      Serial.print("");
+    
+    Serial.print( int(Iy[i]) );
+    if (i<3)
+      Serial.print(",");
+  }
+  Serial.println("");
+  delay(15);
   return false; // explicit: camera not available yet
 }
 
@@ -207,11 +287,10 @@ void setupGyroscope() {
 
     Serial.println("Adafruit BNO08x IMU - UART-RVC mode");
 
-    Serial1.begin(115200); // This is the baud rate specified by the datasheet
+    Serial1.begin(115200, SERIAL_8N1, BNO_RX, BNO_TX); // Define the pins we are using with the sensor. 115200 is the baud rate specified by the datasheet
     while (!Serial1)
         delay(10);
 
-    Serial1.begin(115200, SERIAL_8N1, BNO_RX, BNO_TX); // Define the pins we are using with the sensor
 
     if (!rvc.begin(&Serial1)) { // connect to the sensor over hardware serial
         Serial.println("Could not find BNO08x!");
@@ -226,10 +305,17 @@ void setupGyroscope() {
 // This function is called each time before sending the remote payload to the console
 bool readGyroscope(GyroscopePayload& out) {
   BNO08x_RVC_Data heading;
-  if (!rvc.read(&heading)) return false;
+  
+  // To understand why this double-check: https://claude.ai/share/e2369bef-e1bb-41e0-90b9-f1987f1cefd1
+  if (!rvc.read(&heading)) { // If the sensor is still transmitting data to the ESP32 buffer, we may have to wait for the end of the transmission.
+    delay(3); // wait for frame to finish transmitting (~1.65ms)
+    if (!rvc.read(&heading)) return false; // Here, we are almost sure that the buffer is just empty/not at the right format.
+  }
+
   out.pitch = heading.pitch; // Rotation around the 2 white connectors
   out.yaw = heading.yaw; // Rotation around sensor plane normal (horizontal)
   out.roll = heading.roll; // Rotation around the 2 pin edges
+  Serial.printf("Gyro: %f, %f, %f\n", heading.pitch, heading.yaw, heading.roll);
   return true;
 }
 
@@ -349,11 +435,15 @@ void setup() {
 void loop() {
   static unsigned long lastTick = 0;
 
-  if (boardState.computerConnected && (millis() - lastTick > NOTIFY_INTERVAL_MS)) { // We send data at a defined frequency
+  if ((millis() - lastTick > NOTIFY_INTERVAL_MS)) { // (boardState.computerConnected && ) We send data at a defined frequency
     lastTick = millis();
+    Serial.println("loop.");
 
-    if (!readGyroscope(gyroscopePayload)) return; // sensor miss
-    if (!readIRCamera(irCameraPayload)) return; // not ready yet
+    readGyroscope(gyroscopePayload);
+    
+    readIRCamera(irCameraPayload); // not ready yet
+
+    return;
 
     if (!updateBoardState(gyroscopePayload, irCameraPayload, boardState)) return; // log result if needed
 
