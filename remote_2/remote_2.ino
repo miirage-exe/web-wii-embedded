@@ -14,6 +14,7 @@
 #define NOTIFY_INTERVAL_MS 20 // 20ms interval -> 50Hz
 
 #define BUTTON_A_PIN 7
+#define BUTTON_B_PIN 9
 
 // === Mathematics types =====================================================
 
@@ -37,6 +38,12 @@ struct GyroscopePayload {
   float roll = 0;
   float yaw = 0;
 } gyroscopePayload;
+
+struct GyroscopeOffset {
+  float pitch = 0;
+  float roll  = 0;
+  float yaw   = 0;
+} gyroscopeOffset;
 
 struct IRCameraPayload {
   int x1 = 0;
@@ -183,6 +190,7 @@ void updateLed() {
 
 void setupButtons() {
   pinMode(BUTTON_A_PIN, INPUT);
+  pinMode(BUTTON_B_PIN, INPUT);  // reset button
 }
 
 // === IR Camera =======================================================
@@ -312,11 +320,19 @@ bool readGyroscope(GyroscopePayload& out) {
     if (!rvc.read(&heading)) return false; // Here, we are almost sure that the buffer is just empty/not at the right format.
   }
 
-  out.pitch = heading.pitch; // Rotation around the 2 white connectors
-  out.yaw = heading.yaw; // Rotation around sensor plane normal (horizontal)
-  out.roll = heading.roll; // Rotation around the 2 pin edges
+  out.pitch = heading.pitch - gyroscopeOffset.pitch; // Rotation around the 2 white connectors
+  out.yaw = heading.yaw - gyroscopeOffset.yaw; // Rotation around sensor plane normal (horizontal)
+  out.roll = heading.roll - gyroscopeOffset.roll; // Rotation around the 2 pin edges
   Serial.printf("Gyro: %f, %f, %f\n", heading.pitch, heading.yaw, heading.roll);
   return true;
+}
+
+// Captures the current orientation as the new zero reference
+void resetGyroscope(const GyroscopePayload& current, GyroscopeOffset& offset) {
+  offset.pitch += current.pitch; // raw = offset + current, so new offset = raw
+  offset.roll  += current.roll;
+  offset.yaw   += current.yaw;
+  Serial.println("[Gyro]: Origin reset.");
 }
 
 
@@ -440,6 +456,11 @@ void loop() {
     Serial.println("loop.");
 
     readGyroscope(gyroscopePayload);
+    
+    // Reset gyroscope origin when button B is pressed
+    if (digitalRead(BUTTON_B_PIN)) {
+      resetGyroscope(gyroscopePayload, gyroscopeOffset);
+    }
     
     readIRCamera(irCameraPayload); // not ready yet
 
