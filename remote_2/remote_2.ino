@@ -21,6 +21,8 @@
 typedef float vec3[3];
 typedef float mat3[3][3];
 
+bool PRINT_FLAG = false;
+
 // === Board state =============================================================
 
 struct BoardState {
@@ -45,16 +47,22 @@ struct GyroscopeOffset {
   float yaw   = 0;
 } gyroscopeOffset;
 
+struct BuiltinOffset {
+  float pitch = 0;
+  float roll  = 3.1415/2;
+  float yaw   = 0;
+} builtinOffset;
+
 struct IRCameraPayload {
   int x1 = 0;
   int y1 = 0;
   int x2 = 0;
   int y2 = 0;
   // Constants
-  float W = 128; // Width (in pixels) of the IR Camera (cf. documentation)
-  float H = 96; // Height (in pixels) of the IR Camera (cf. documentation)
-  float fov_w = 90.0f*3.14159/180.0f;
-  float fov_h = 90.0f*3.14159/180.0f;
+  float W = 1024; // Width (in pixels) of the IR Camera (cf. documentation)
+  float H = 768; // Height (in pixels) of the IR Camera (cf. documentation)
+  float fov_w = 33.0f*3.14159/180.0f;
+  float fov_h = 23.0f*3.14159/180.0f;
 } irCameraPayload;
 
 struct CursorPayload {
@@ -78,6 +86,14 @@ float dot3(const vec3 a, const vec3 b) {
 
 float norm2_3(const vec3 a) {
   return dot3(a, a);
+}
+
+void mat3_mul_mat3(const mat3 A, const mat3 B, mat3 out) { // A*B
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      out[i][j] = A[i][0]*B[0][j] + A[i][1]*B[1][j] + A[i][2]*B[2][j];
+    }
+  }
 }
 
 // Builds the rotation matrix following yaw->pitch->roll convention
@@ -120,7 +136,7 @@ void pixel_to_world_ray(
 }
 
 bool localise_remote(
-  float psi, float theta, float phi, // Euler angles (rad)
+  float psi, float theta, float phi, // Euler angles (rad) (yaw/pitch/roll)
   float u1, float v1, float u2, float v2, // raw camera pixels values
   float d, // distance between two leds
   const IRCameraPayload& ir,
@@ -134,13 +150,22 @@ bool localise_remote(
   float cx = ir.W / 2.0f, cy = ir.H / 2.0f;
 
   // rotation matrix
+  mat3 built_in_R;
+  build_rotation(builtinOffset.yaw, builtinOffset.pitch, builtinOffset.roll, built_in_R);
+  mat3 gyro_R;
+  build_rotation(psi, theta, phi, gyro_R);
   mat3 R;
-  build_rotation(psi, theta, phi, R);
+  mat3_mul_mat3(gyro_R, built_in_R, R);
 
   // world-space rays r1, r2
   vec3 r1, r2;
   pixel_to_world_ray(u1, v1, fx, fy, cx, cy, R, r1);
   pixel_to_world_ray(u2, v2, fx, fy, cx, cy, R, r2);
+
+  if (PRINT_FLAG) {
+    Serial.printf("Ray1 in O space: (%f, %f, %f)\n", r1[0], r1[1], r1[2]);
+    Serial.printf("Ray2 in O space: (%f, %f, %f)\n", r2[0], r2[1], r2[2]);
+  }
 
   // closed-form solve, eq.(26)
   float alpha = norm2_3(r1); //  |r1|^2
@@ -150,20 +175,34 @@ bool localise_remote(
 
   if (fabsf(delta) < 1e-9f) return false; // degenerate: rays are parallel
 
-  float lambda1 = (2.0f*d / delta) * (gamma*r1[0] + beta*r2[0]); // eq.(26)
-  float lambda2 = (2.0f*d / delta) * (beta*r1[0] + alpha*r2[0]);
+  float lambda1 = (-2.0f*d / delta) * (gamma*r1[0] - beta*r2[0]); // eq.(26)
+  float lambda2 = (-2.0f*d / delta) * (beta*r1[0] - alpha*r2[0]);
 
-  if (lambda1 < 0 || lambda2 < 0) return false; // leds behind camera (impossible)
+  if (PRINT_FLAG) {
+    Serial.printf("lambda1: %f | lambda2: %f\n", lambda1, lambda2);
+  }
+
+  // if (lambda1 < 0 || lambda2 < 0) return false; // leds behind camera (impossible)
 
   // recover P, eq.(27-29)
   // P1 = L1 - λ1.r1,  P2 = L2 - λ2.r2,  P = (P1+P2)/2
-  vec3 L1 = { d, 0, 0}, L2 = {-d, 0, 0};
+  vec3 L1 = { -d, 0, 0}, L2 = {d, 0, 0};
   for (int i = 0; i < 3; i++) {
     P_out[i] = 0.5f * ((L1[i] - lambda1*r1[i]) + (L2[i] - lambda2*r2[i]));
   }
 
   // calculate the ray vector
-  mat3_mul_vec3(R, vec3{0,1,0}, ray_out);
+  mat3_mul_vec3(R, vec3{0,-1,0}, ray_out);
+
+  if (PRINT_FLAG) {
+    vec3 test = {0, 0, 0};
+    mat3_mul_vec3(R, vec3{1,0,0}, test);
+    Serial.printf("X axis: O -> R : (%f, %f, %f)\n", test[0], test[1], test[2]);
+    mat3_mul_vec3(R, vec3{0,1,0}, test);
+    Serial.printf("Y axis: O -> R : (%f, %f, %f)\n", test[0], test[1], test[2]);
+    mat3_mul_vec3(R, vec3{0,0,1}, test);
+    Serial.printf("Z axis: O -> R : (%f, %f, %f)\n", test[0], test[1], test[2]);
+  }
 
   return true;
 }
@@ -254,31 +293,38 @@ bool readIRCamera(IRCameraPayload& out) {
   s = data_buf[12];
   Ix[3] += (s & 0x30) <<4;
   Iy[3] += (s & 0xC0) <<2;
-  for(i=0; i<4; i++)
-  {
-    if (Ix[i] < 1000)
-      Serial.print("");
-    if (Ix[i] < 100)
-      Serial.print("");
-    if (Ix[i] < 10)
-      Serial.print("");
+  // for(i=0; i<4; i++)
+  // {
+  //   if (Ix[i] < 1000)
+  //     Serial.print("");
+  //   if (Ix[i] < 100)
+  //     Serial.print("");
+  //   if (Ix[i] < 10)
+  //     Serial.print("");
     
-    Serial.print( int(Ix[i]) );
-    Serial.print(",");
-    if (Iy[i] < 1000)
-      Serial.print("");
-    if (Iy[i] < 100)
-      Serial.print("");
-    if (Iy[i] < 10)
-      Serial.print("");
+  //   Serial.print( int(Ix[i]) );
+  //   Serial.print(",");
+  //   if (Iy[i] < 1000)
+  //     Serial.print("");
+  //   if (Iy[i] < 100)
+  //     Serial.print("");
+  //   if (Iy[i] < 10)
+  //     Serial.print("");
     
-    Serial.print( int(Iy[i]) );
-    if (i<3)
-      Serial.print(",");
+  //   Serial.print( int(Iy[i]) );
+  //   if (i<3)
+  //     Serial.print(",");
+  // }
+  // Serial.println("");
+  if (Iy[0] < 1023 && Ix[0] < 1023 && Iy[1] < 1023 && Ix[1] < 1023) {
+    int small_int = Iy[0] < Iy[1] ? 0 : 1;
+    out.x1 = Iy[small_int];
+    out.y1 = Ix[small_int];
+    out.x2 = Iy[1- small_int];
+    out.y2 = Ix[1- small_int];
   }
-  Serial.println("");
-  delay(15);
-  return false; // explicit: camera not available yet
+
+  return true;
 }
 
 // === Gyroscope (BNO085x) =============================================================
@@ -323,7 +369,7 @@ bool readGyroscope(GyroscopePayload& out) {
   out.pitch = heading.pitch - gyroscopeOffset.pitch; // Rotation around the 2 white connectors
   out.yaw = heading.yaw - gyroscopeOffset.yaw; // Rotation around sensor plane normal (horizontal)
   out.roll = heading.roll - gyroscopeOffset.roll; // Rotation around the 2 pin edges
-  Serial.printf("Gyro: %f, %f, %f\n", heading.pitch, heading.yaw, heading.roll);
+  // Serial.printf("Gyro: %f, %f, %f\n", heading.pitch, heading.yaw, heading.roll);
   return true;
 }
 
@@ -398,7 +444,7 @@ bool updateBoardState(
   BoardState& state)
 {
   if (!localise_remote(
-    gyro.yaw, gyro.pitch, gyro.roll,
+    gyro.yaw*3.1415/180.0f, gyro.pitch*3.1415/180.0f, gyro.roll*3.1415/180.0f,
     ir.x1, ir.y1, ir.x2, ir.y2,
     LED_DISTANCE_MM/2,
     irCameraPayload,
@@ -427,11 +473,13 @@ void notifyComputer() {
   if (pRemoteCharacteristic != nullptr) {
     pRemoteCharacteristic->setValue((uint8_t*)&cursorPayload, sizeof(cursorPayload));
     pRemoteCharacteristic->notify();
-    Serial.printf("[Remote]: Notified console\n");
+    // Serial.printf("[Remote]: Notified console\n");
   }
 }
 
 // === Orchestration =============================================
+
+int did_init = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -450,25 +498,42 @@ void setup() {
 
 void loop() {
   static unsigned long lastTick = 0;
+  static unsigned long lastPrint = 0;
 
   if ((millis() - lastTick > NOTIFY_INTERVAL_MS)) { // (boardState.computerConnected && ) We send data at a defined frequency
     lastTick = millis();
-    Serial.println("loop.");
+
+
+    if (millis() - lastPrint > 1000) {
+      lastPrint = millis();
+      PRINT_FLAG = true;
+      Serial.printf("======== DEBUG ========\n");
+    }
 
     readGyroscope(gyroscopePayload);
     
     // Reset gyroscope origin when button B is pressed
-    if (digitalRead(BUTTON_B_PIN)) {
+    if (digitalRead(BUTTON_B_PIN) || did_init < 10) {
+      did_init++;
       resetGyroscope(gyroscopePayload, gyroscopeOffset);
     }
     
-    readIRCamera(irCameraPayload); // not ready yet
+    readIRCamera(irCameraPayload); // not ready yet (TODO: completer la fonction)
 
-    return;
+    if (!updateBoardState(gyroscopePayload, irCameraPayload, boardState)) {
+      return;  
+    }
 
-    if (!updateBoardState(gyroscopePayload, irCameraPayload, boardState)) return; // log result if needed
+    if (PRINT_FLAG) {
+      Serial.printf("Gyro: pitch %f,  roll %f, yaw %f\n", gyroscopePayload.pitch, gyroscopePayload.roll, gyroscopePayload.yaw);
+      Serial.printf("Camera: (%d, %d), (%d, %d)\n", irCameraPayload.x1, irCameraPayload.y1, irCameraPayload.x2, irCameraPayload.y2);
+      Serial.printf("Pos: %f, %f, %f\n", boardState.pos[0], boardState.pos[1], boardState.pos[2]);
+      Serial.printf("Ray: %f, %f, %f\n", boardState.ray[0], boardState.ray[1], boardState.ray[2]);
+    }
 
     assembleCursorPayload(boardState, cursorPayload);
     notifyComputer();
+
+    PRINT_FLAG = false;
   }
 }
