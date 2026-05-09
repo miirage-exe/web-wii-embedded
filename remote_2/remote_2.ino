@@ -60,11 +60,16 @@ struct IRCameraPayload {
 } irCameraPayload;
 
 struct CursorPayload {
+  /* X position of the cursor from the center of the screen. In mm multiplied by 100 */
   int32_t x = 0 * 100;
+  /* Y position of the cursor from the center of the screen. In mm multiplied by 100 */
   int32_t y = 0 * 100;
+  /* Orientation of the cursor in degree multiplied by 100. Positive = anticlockwise */
   int32_t roll = 0 * 100;
+  /* Button mask */
   uint8_t buttonMask = 0; // lowest bit (1) = button A, second bit (2) = button B 
-  uint8_t sensorMask = 0; //0b[0][0][0][0][0][valid computation values ?][valid IR camera measurement ?][valid gyroscope measurement ?]
+  /* Mask giving the what went wrong during the computation of the cursor (see MISS_MASK in "Orchestration" section) */
+  uint8_t missMask = 0;
 } cursorPayload;
 
 // === Mathematics =============================================================
@@ -127,7 +132,7 @@ void pixel_to_world_ray(
     -1.0f,
     (v_raw - cy) / fy
   };
-  mat3T_mul_vec3(R, d, r_out); // eq.(16)
+  mat3_mul_vec3(R, d, r_out); // eq.(16)
 }
 
 bool localise_remote(
@@ -153,6 +158,18 @@ bool localise_remote(
   pixel_to_world_ray(u1, v1, fx, fy, cx, cy, R, r1);
   pixel_to_world_ray(u2, v2, fx, fy, cx, cy, R, r2);
 
+  /*
+  For the calculation to be right, our "r1" ray must be the remote->L1(d,0,0) ray, not the remote->L2(-d,0,0) one.
+  To make the difference between those two rays, the simplest way is to look at the x coordonate: it is always smaller on the remote->L1 ray.
+  So we permute our r1/r2 variables values if it is not the case.
+  */
+  if (r1[0] < r2[0]) {
+    vec3 tmp;
+    memcpy(tmp, r1, sizeof(vec3));
+    memcpy(r1, r2, sizeof(vec3));
+    memcpy(r2, tmp, sizeof(vec3));
+  }
+
   if (PRINT_FLAG) {
     Serial.printf("Ray1 in O space: (%f, %f, %f)\n", r1[0], r1[1], r1[2]);
     Serial.printf("Ray2 in O space: (%f, %f, %f)\n", r2[0], r2[1], r2[2]);
@@ -172,8 +189,6 @@ bool localise_remote(
   if (PRINT_FLAG) {
     Serial.printf("lambda1: %f | lambda2: %f\n", lambda1, lambda2);
   }
-
-  if (lambda1 < 0 || lambda2 < 0) return false; // leds behind camera (impossible)
 
   // recover P, eq.(27-29)
   // P1 = L1 - λ1.r1,  P2 = L2 - λ2.r2,  P = (P1+P2)/2
@@ -195,6 +210,7 @@ bool localise_remote(
     Serial.printf("Z axis: O -> R : (%f, %f, %f)\n", test[0], test[1], test[2]);
   }
 
+  if (lambda1 < 0 || lambda2 < 0) return false; // leds behind camera (impossible)
   return true;
 }
 
@@ -204,10 +220,10 @@ Adafruit_NeoPixel pixels(1, PIN_NEOPIXEL);
 
 void setupLED() {
   pixels.begin(); 
-  updateLed();
+  turnLedOn();
 }
 
-void updateLed() {
+void turnLedOn() {
   pixels.setPixelColor(0, pixels.Color(
     boardState.computerConnected ? 255 : 0, // Red + Green: computer is connected ?
     boardState.computerConnected ? 255 : 0,
@@ -312,7 +328,6 @@ bool readIRCamera(IRCameraPayload& out) {
   //     Serial.print(",");
   // }
   // Serial.println("");
-  if (Iy[0] == 1023 || Ix[0] == 1023 || Iy[1] == 1023 || Ix[1] == 1023) return false;
   
   int smallest_x = Iy[0] < Iy[1] ? 0 : 1;
   out.x1 = Iy[1-smallest_x];
@@ -320,6 +335,7 @@ bool readIRCamera(IRCameraPayload& out) {
   out.x2 = Iy[smallest_x];
   out.y2 = Ix[smallest_x];
 
+  if (Iy[0] == 1023 || Ix[0] == 1023 || Iy[1] == 1023 || Ix[1] == 1023) return false;
   return true;
 }
 
@@ -389,12 +405,12 @@ class ComputerCallback: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     Serial.printf("[Remote]: Computer connected\n");
     boardState.computerConnected = true;
-    updateLed();
+    turnLedOn();
   }
   
   void onDisconnect(BLEServer* pServer) {
     boardState.computerConnected = false;
-    updateLed();
+    turnLedOn();
     delay(1000);
     BLEDevice::startAdvertising();
   }
@@ -453,25 +469,27 @@ bool updateBoardState(
   return true;
 }
 
-void assembleCursorPayload(const BoardState& state, const uint8_t sensorMask, CursorPayload& out) {
+void assembleCursorPayload(const BoardState& state, const uint8_t missMask, CursorPayload& out) {
   float t = -state.pos[1] / state.ray[1];
   out.x = (int32_t)((state.pos[0] + t * state.ray[0]) * 100);
   out.y = (int32_t)((state.pos[2] + t * state.ray[2]) * 100);
   out.roll = (int32_t)(state.pitch * 100);
 
+  if (PRINT_FLAG) {
+    Serial.printf("Cursor: (%d, %d)\n", out.x/100, out.y/100);
+  }
+
   uint8_t mask = 0;
   if (digitalRead(BUTTON_A_PIN)) mask |= (1 << 0);
   out.buttonMask = mask;
 
-  out.sensorMask = sensorMask;
-
+  out.missMask = missMask;
 }
 
 void notifyComputer() {
   if (pRemoteCharacteristic != nullptr) {
     pRemoteCharacteristic->setValue((uint8_t*)&cursorPayload, sizeof(cursorPayload));
     pRemoteCharacteristic->notify();
-    // Serial.printf("[Remote]: Notified console\n");
   }
 }
 
@@ -491,37 +509,35 @@ void setup() {
   setupRemoteBluetooth();
 
   BLEDevice::startAdvertising(); // Make the remote visible to the console
-  updateLed();
+  turnLedOn();
 }
 
-bool MISS_FLAG = false;
+/*
+This mask allows us to know at each cursor computation if something went wrong.
+first bit: missed gyroscope data
+second bit: IR camera missed one (or both) IR led
+third bit: missed computation (negative lambda or parallel rays)
+*/
+int MISS_MASK = 0;
 
 void loop() {
   static unsigned long lastTick = 0;
   static unsigned long lastPrint = 0;
 
   if ((millis() - lastTick > NOTIFY_INTERVAL_MS)) { // (boardState.computerConnected && ) We send data at a defined frequency
-    if (PRINT_FLAG) {
-      Serial.printf("=== Missed cursor calculation ===.\n");
-      PRINT_FLAG = 0;
-    }
+
     lastTick = millis();
-
-    if (MISS_FLAG) {
-      turnLedOff();
-    } else {
-      updateLed();
-    }
-    MISS_FLAG = true;
-
 
     if (millis() - lastPrint > 1000) {
       lastPrint = millis();
       PRINT_FLAG = true;
       Serial.printf("======== DEBUG ========\n");
+      Serial.printf("=== Last missed: %d ===.\n", MISS_MASK);
     }
 
-    if(!readGyroscope(gyroscopePayload)) return;
+    MISS_MASK = 0;
+
+    if(!readGyroscope(gyroscopePayload)) MISS_MASK += 0b1;
     
     // Reset gyroscope origin when button B is pressed
     if (digitalRead(BUTTON_B_PIN) || did_init < 10) {
@@ -529,9 +545,9 @@ void loop() {
       resetGyroscope(gyroscopePayload, gyroscopeOffset);
     }
     
-    if(!readIRCamera(irCameraPayload)) return; // not ready yet (TODO: completer la fonction)
+    if(!readIRCamera(irCameraPayload)) MISS_MASK += 0b10;
 
-    if (!updateBoardState(gyroscopePayload, irCameraPayload, boardState)) return;
+    if (!updateBoardState(gyroscopePayload, irCameraPayload, boardState)) MISS_MASK += 0b100;
 
     if (PRINT_FLAG) {
       Serial.printf("Gyro: pitch %f,  roll %f, yaw %f\n", gyroscopePayload.pitch, gyroscopePayload.roll, gyroscopePayload.yaw);
@@ -540,10 +556,15 @@ void loop() {
       Serial.printf("Ray: %f, %f, %f\n", boardState.ray[0], boardState.ray[1], boardState.ray[2]);
     }
 
-    assembleCursorPayload(boardState, 0b00000111, cursorPayload);
+    assembleCursorPayload(boardState, MISS_MASK, cursorPayload);
     notifyComputer();
 
     PRINT_FLAG = false;
-    MISS_FLAG = false;
+
+    if (MISS_MASK > 0) {
+      turnLedOff();
+    } else {
+      turnLedOn();
+    }
   }
 }
