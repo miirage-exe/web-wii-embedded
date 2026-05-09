@@ -18,6 +18,7 @@
 \usepackage{parskip}
 \usepackage{titlesec}
 \usepackage{fancyhdr}
+\usepackage{enumitem}
 
 \hypersetup{
     colorlinks=true,
@@ -39,8 +40,11 @@
     captionpos=b
 }
 
+\newtheorem{remark}{Remark}
+\newtheorem{definition}{Definition}
+
 \title{SEES Project - Web Wii}
-\author{Mika Baëza, Kawtar Bidoukhach, Mohammad Parto}
+\author{Mika Baëza, Mohammad Parto, Kawtar Bidoukhach}
 \date{April 2026}
 
 
@@ -55,8 +59,6 @@
 
 In 2006, Nintendo introduced its new console to the public: the Nintendo Wii. At the time, this game console was a breakthrough due to the specificity of its controller, the \textit{Wii Remote}. The particularity of this remote is its ability to act as an intuitive pointing device. The Wii Remote can be seen as a laser pointer, except that the position it points to on screen becomes a cursor, allowing users to interact with on-screen elements in a natural and intuitive way.
 
-% Beyond pointing, the Wii Remote also captures the player's physical gestures through motion sensing, translating real-world movements into in-game actions. This combination of pointing and motion sensing defined a new paradigm for human-computer interaction in consumer electronics.
-
 In this project, we aimed to recreate this intuitive device using modern embedded hardware. The system consists of one Adafruit Metro ESP32-S3 boards communicating over Bluetooth Low Energy (BLE) to a webpage opened on a PC.
 
 This report describes the system architecture, hardware design, sensor modelling, firmware implementation, and experimental results of this project.
@@ -65,28 +67,29 @@ This report describes the system architecture, hardware design, sensor modelling
 
 \subsection{The Original Wii Remote}
 
-% TODO: Brief description of how the original Wii Remote works — IR sensor bar,
-% MotionPlus gyroscope, accelerometer, and how Nintendo combined them.
-% Reference the original hardware if available.
+The Nintendo Wii Remote achieves its pointing and motion-sensing capabilities through two complementary subsystems: an infrared optical system and an accelerometer.
+
+\paragraph{IR-based pointing.}
+The \textit{sensor bar} bundled with the Wii console is entirely passive: it contains a pair of infrared LEDs at each end of a $\sim$20\,cm bar and transmits no data~\cite{wiibrew}. All sensing occurs inside the remote, which contains a forward-facing IR camera. This camera detects up to four IR sources and outputs their 2D image-plane coordinates directly~\cite{wiibrew}. From the known physical separation of the two LED clusters, the console software infers where the remote is pointing on screen. The sensor bar is nothing more than a pair of fixed IR beacons: any two IR LEDs at a known separation can serve as a functional substitute.
+
+\paragraph{Accelerometer.}
+The original Wii Remote included a 3-axis accelerometer for gesture and tilt sensing, but lacked independent rotational tracking. This was addressed in 2009 with the Wii\,MotionPlus accessory, which added a multi-axis MEMS gyroscope~\cite{motionplus_wiki}. 
+
+\paragraph{Relevance to this project.}
+This project mostly mirrors the same architecture: two fixed IR LEDs replace the sensor bar, and the remote's IR camera tracks them to derive cursor coordinates. Anyway, for this project, we decided to use a IMU that combines accelerometer and gyroscope data to give a ready-to-use orientation data, since our goal is to just have a point device, and not detect any shaking or other user movement, having directly the orientation of the remote makes the computation of the cursor position easier.
 
 \subsection{Bluetooth Low Energy (BLE)}
 
-% TODO: Explain the GATT model, peripheral/central roles, notifications vs. polling.
+% TODO: Explain the GATT model, notifications vs. polling, and that notifications has be prefered.
 % Explain why BLE was chosen over Wi-Fi for this application (latency, power).
 
 \subsection{Inertial Measurement Units and Sensor Fusion}
 
 % TODO: Explain IMU basics (accelerometer, gyroscope, magnetometer).
-% Introduce the problem of yaw drift and why a magnetometer solves it.
 % Explain what sensor fusion is and mention the Kalman/complementary filter,
 % and why the BNO085's onboard fusion removes the need to implement one manually.
 
 \subsection{IR-Based Pointing and Perspective Projection}
-
-% TODO: Explain how an IR camera produces a 2D projection of 3D space.
-% Introduce the concept of perspective projection and its limitations
-% (loss of depth). Motivate the use of a single IR LED as a screen anchor.
-
 
 
 \section{Description}
@@ -97,12 +100,14 @@ This report describes the system architecture, hardware design, sensor modelling
 
 The system is composed of one ESP32-S3 boards exclusively over BLE with a web page, and a reference device placed on top of the screen.
 
-\paragraph{Remote board} The handheld unit is battery-powered and hosts a BNO085 IMU (UART) for orientation sensing, an IR Camera which tracks the IR LEDs on the reference device to extract cursor coordinates, and several tactile buttons. It acts as a BLE \textit{peripheral} (forwarding data to the PC) at maximum 50\,Hz.
+\paragraph{Remote board} The handheld unit is battery-powered and hosts a BNO085 IMU (UART) for orientation sensing, an IR Camera which tracks the IR LEDs on the reference device to extract cursor coordinates, and several buttons. It acts as a BLE \textit{peripheral} (forwarding data to the PC) at maximum 100\,Hz.
 
 \paragraph{Reference device} The reference device is USB-powered and hosts two IR leds separated of 20cm,  It does not contain any internal logic and is just used as a reference line for the remote IR camera. 
 Figure~\ref{fig:architecture} shows the overall system block diagram.
 
-\paragraph{Web page} For this project, we decided to work with a web page. Since Chrome [...] we decided used the web bluetooth API to connect the web page to the remote. 
+\paragraph{Web page}
+The user interface is implemented as a web page built with Svelte and SvelteKit. Communication with the remote is handled through the Web Bluetooth API~\cite{chrome_bluetooth}, supported natively in Google Chrome since version~56, which allows a web page to connect directly to a BLE peripheral without any native application or driver.
+
 Figure~\ref{fig:architecture} shows the overall system block diagram.
 
 \begin{figure}[H]
@@ -119,50 +124,113 @@ Figure~\ref{fig:architecture} shows the overall system block diagram.
 
 
 
-\subsection{Sensor Modelling and Cursor Estimation}
+\subsection{Cursor Estimation}
 
+The goal of cursor estimation is to recover the 3-D position
+$\mathbf{P} = (p_x,\, p_y,\, p_z)^\top$ of the remote in the global frame
+from two pieces of information: the IMU orientation and the pixel coordinates
+of the two IR beacons observed by the on-board camera.
 
+The IR camera back-projects each observed pixel $(u_i, v_i)$ into a ray
+direction $\mathbf{d}_i$ in the camera frame using the pinhole model and the
+known camera intrinsics (focal lengths $f_x$, $f_y$ derived from the sensor's
+field of view). Each ray is then rotated into the global frame using the
+rotation matrix $\mathbf{R}$ built from the IMU's yaw, pitch and roll:
+\begin{equation}
+    \mathbf{r}_i = \mathbf{R}\,\mathbf{d}_i, \qquad i = 1, 2.
+\end{equation}
 
+Since each beacon $L_i$ must lie along its corresponding ray, the remote's
+position satisfies $\mathbf{P} = L_i - \lambda_i\,\mathbf{r}_i$ for some
+scalar depth $\lambda_i > 0$. Equating the two expressions for $\mathbf{P}$
+yields an overdetermined $3 \times 2$ linear system in $(\lambda_1, \lambda_2)$,
+which is solved in closed form by least squares. The final position estimate is:
+\begin{equation}
+    \mathbf{P} = \frac{1}{2}\bigl[
+        (L_1 - \lambda_1\,\mathbf{r}_1) + (L_2 - \lambda_2\,\mathbf{r}_2)
+    \bigr].
+\end{equation}
+
+The system is well-conditioned as long as the two beacons do not project onto
+the same pixel, which is guaranteed whenever the reference bar is visible.
+The full derivation, including the explicit closed-form expressions for
+$\lambda_1$ and $\lambda_2$, is given in Annex~\ref{annex:localisation}.
 \subsection{BLE Communication Protocol}
 
-The remote transmits a 7-byte packet to the console at $\sim$50\,Hz:
+The remote transmits a 14-byte packet to the console at $\sim$100\,Hz:
 
-\begin{lstlisting}[caption={BLE packet structure (remote $\to$ console)}, label={lst:packet}]
+\begin{lstlisting}[caption={BLE packet structure (remote $\to$ PC)}, label={lst:packet}]
 struct RemotePacket {
-    int32_t pitch;    // degrees * 100  (4 bytes)
-    int32_t roll;     // degrees * 100  (4 bytes)
-    int32_t yaw;      // degrees * 100  (4 bytes)
-    uint8_t buttons;  // bitmask        (1 byte)
-};                    // Total: 13 bytes
+    int32_t x;           // mm * 100       (4 bytes)
+    int32_t y;           // mm * 100       (4 bytes)
+    int32_t pitch;       // degrees * 100  (4 bytes)
+    uint8_t buttonMask;  // bitmask        (1 byte)
+    uint8_t missMask;    // bitmask        (1 byte)
+};                       // Total: 14 bytes
 \end{lstlisting}
 
 
 
 \subsection{Firmware Design}
 
-
+% TODO: Describe the remote board firmware:
+%   - Initialization and configuration of the BNO085 (UART RVC mode)
+%   - Reading and parsing of the IR camera (SEN0158) over I2C
+%   - Button GPIO reading and bitmask encoding
+%   - Packet construction and BLE notification at ~100 Hz
+%   - Task scheduling / loop timing to hit the target frequency
+%
+% BLE peripheral setup:
+%   - GATT service and characteristic definition
+%   - Advertising configuration
+%   - Notification logic
+%
+% Note: packet structure is already covered in §2.4, do not repeat it here.
 
 \section{Experimental Results and Testing}
 
-
-
 \section{Discussion and Conclusion}
-
-
 
 \subsection{Limitations and Trade-offs}
 
+\paragraph{IR LED emission angle.}
+The IR LEDs used on the reference device have a narrow emission cone of approximately 20°. When the remote is pointed too far off-axis relative to the reference bar, the IR camera loses sight of one or both beacons, causing cursor tracking to fail. This is not a fundamental limitation of the pointing algorithm but rather a consequence of the specific LEDs chosen. Substituting wider-angle IR emitters would directly extend the usable pointing range without any firmware change.
+
+\paragraph{BNO085 sensor fusion inertia.}
+The BNO085 onboard fusion algorithm prioritises orientation stability over instantaneous responsiveness. In practice, this introduces a slight lag on fast rotational movements, making rapid gestures feel softly delayed on screen.
+
+\paragraph{Browser compatibility.}
+The Web Bluetooth API is currently only supported in Chromium-based browsers~\cite{chrome_bluetooth}, restricting the system to Chrome, Edge or Brave etc... on desktop. Safari and Firefox do not implement the API, which limits the portability of the web interface.
 
 
 \subsection{Conclusion}
 
+This project successfully reproduced the core experience of the Nintendo Wii Remote using modern embedded hardware. The full system pipeline — IR-based cursor pointing, absolute orientation sensing, button input, BLE transmission, and web-based rendering demonstrated that such an interface can be built with modern components and a browser as the only software dependency for the user.
+
+Two practical limitations were identified during use. First, the IR LEDs used on the reference device have a narrow $\sim$20° emission cone. This is an inherent constraint of the chosen LEDs rather than of the pointing algorithm, and could be addressed by substituting wider-angle IR emitters. Second, the BNO085's onboard sensor fusion introduces a slight inertia on fast rotational movements, causing a perceptible lag between physical gesture and on-screen response. This is a known trade-off of gyroscope-based fusion filters, which prioritise stability over instantaneous responsiveness.
+
+Overall, the system met the objectives of the project. The design validates the use of a passive IR reference, an onboard fusion IMU, and the Web Bluetooth API as a viable and accessible stack for building motion-controlled pointing devices, with no native software required on the host machine.
 
 
 \section{References}
+\begin{thebibliography}{99}
+
+\bibitem{motionplus_wiki}
+Wikipedia, \textit{Wii MotionPlus}.
+\url{https://en.wikipedia.org/wiki/Wii_MotionPlus}
+
+\bibitem{motionplus_iwata}
+Nintendo, \textit{Iwata Asks: Wii MotionPlus --- Combining Two Sensors}, 2009.
+\url{https://www.nintendo.com/en-gb/Iwata-Asks/Iwata-Asks-Wii-MotionPlus/Read-more/2-Combining-Two-Sensors/2-Combining-Two-Sensors-225646.html}
 
 \bibitem{wiibrew}
 Wiibrew, \textit{Wiimote wiki}.
 \url{https://wiibrew.org/wiki/Wiimote}
+
+\bibitem{chrome_bluetooth}
+F.\ Beaufort, \textit{Communicating with Bluetooth Devices over JavaScript},
+Google Chrome for Developers, 2015.
+\url{https://developer.chrome.com/docs/capabilities/bluetooth}
 
 \bibitem{web_bluetooth}
 MDN Web Docs, \textit{Web Bluetooth API}.
@@ -176,4 +244,428 @@ Adafruit Industries, \textit{BNO085 Datasheet}, 2025.
 DFRobot, \textit{Gravity: IR Positioning Camera Datasheet}, 2025.
 \url{https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/2148/Positioning_IR_Camera_Web.pdf}
 
+\end{thebibliography}
+
+\appendix
+
+\section{3-D Localisation of the Remote}
+\label{annex:localisation}
+
+\subsection{Problem Statement}
+
+\subsubsection{Goal}
+Recover the 3-D position $\mathbf{P} = (p_x,\, p_y,\, p_z)^\top \in \mathbb{R}^3$ of a Wii remote
+in a fixed global frame $\mathcal{O}$, given:
+\begin{itemize}[nosep]
+    \item the orientation of the remote expressed as Euler angles
+          (yaw $\psi$, pitch $\theta$, roll $\phi$);
+    \item the pixel coordinates of two infrared beacons captured by the
+          remote's on-board camera;
+    \item the intrinsic parameters of that camera.
+\end{itemize}
+
+\subsubsection{Known quantities}
+\begin{itemize}[nosep]
+    \item Two beacons fixed in the global frame:
+          $L_1 = (d,\,0,\,0)^\top$ and $L_2 = (-d,\,0,\,0)^\top$,
+          separated by a known distance $2d$.
+    \item Their projections on the camera sensor:
+          $(u_1^{\text{raw}},\, v_1^{\text{raw}})$ and
+          $(u_2^{\text{raw}},\, v_2^{\text{raw}})$.
+    \item Camera intrinsics: image resolution $(W, H)$, horizontal field of
+          view $\theta_w$, vertical field of view $\theta_h$.
+\end{itemize}
+
+\subsubsection{Reference frames}
+\begin{definition}[Global frame $\mathcal{O}$]
+Fixed, world-attached frame with axes $(X, Y, Z)$.
+The beacons $L_1$, $L_2$ are given in this frame.
+\end{definition}
+\begin{definition}[Remote frame $\mathcal{R}$]
+Attached to the remote. Its origin coincides with the camera optical centre
+$\mathbf{P}$; its axes are the global axes rotated by the known Euler angles.
+All camera-model equations hold in this frame.
+\end{definition}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{Step 1 — Rotation Matrix from Euler Angles}
+
+\subsubsection{Elementary rotation matrices}
+Three elementary rotations are defined about the $Z$, $Y$, and $X$ axes
+respectively:
+
+\begin{equation}
+R_z(\psi) =
+\begin{pmatrix}
+\cos\psi & -\sin\psi & 0 \\
+\sin\psi &  \cos\psi & 0 \\
+0        &  0        & 1
+\end{pmatrix},
+\quad
+R_y(\theta) =
+\begin{pmatrix}
+ \cos\theta & 0 & \sin\theta \\
+ 0          & 1 & 0          \\
+-\sin\theta & 0 & \cos\theta
+\end{pmatrix},
+\quad
+R_x(\phi) =
+\begin{pmatrix}
+1 & 0       &  0      \\
+0 & \cos\phi & -\sin\phi \\
+0 & \sin\phi &  \cos\phi
+\end{pmatrix}.
+\end{equation}
+
+\subsubsection{ZYX composition (intrinsic yaw–pitch–roll)}
+Using the \emph{ZYX} intrinsic convention (first yaw about $Z$, then pitch
+about the new $Y$, then roll about the new $X$), the global-to-remote
+rotation matrix is:
+
+\begin{equation}
+\mathbf{R} = R_z(\psi)\,R_y(\theta)\,R_x(\phi).
+\end{equation}
+
+\subsubsection{Explicit expanded form}
+Defining the shorthand $c_\alpha \equiv \cos\alpha$, $s_\alpha \equiv \sin\alpha$:
+
+\begin{equation}
+\mathbf{R} =
+\begin{pmatrix}
+c_\psi c_\theta &
+  c_\psi s_\theta s_\phi - s_\psi c_\phi &
+  c_\psi s_\theta c_\phi + s_\psi s_\phi \\[4pt]
+s_\psi c_\theta &
+  s_\psi s_\theta s_\phi + c_\psi c_\phi &
+  s_\psi s_\theta c_\phi - c_\psi s_\phi \\[4pt]
+-s_\theta &
+  c_\theta s_\phi &
+  c_\theta c_\phi
+\end{pmatrix}.
+\label{eq:R}
+\end{equation}
+
+\subsubsection{Key property}
+Because $\mathbf{R}$ is orthogonal ($\mathbf{R}^\top \mathbf{R} = I_3$), its
+inverse equals its transpose:
+\begin{equation}
+\mathbf{R}^{-1} = \mathbf{R}^\top.
+\end{equation}
+$\mathbf{R}$ transforms vectors from $\mathcal{O}$ to $\mathcal{R}$;
+$\mathbf{R}^\top$ transforms from $\mathcal{R}$ back to $\mathcal{O}$.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{Step 2 — Camera Intrinsic Model}
+
+\subsubsection{From FOV angles to pixel focal lengths}
+The pinhole camera geometry links the physical field of view to the focal
+length expressed in pixels. For the horizontal axis, half the image width
+subtends half the horizontal FOV:
+
+\begin{equation}
+\tan\!\left(\frac{\theta_w}{2}\right) = \frac{W/2}{f_x}
+\quad\Longrightarrow\quad
+\boxed{f_x = \frac{W}{2\tan\!\left(\theta_w/2\right)}}.
+\end{equation}
+
+Likewise for the vertical axis:
+
+\begin{equation}
+\tan\!\left(\frac{\theta_h}{2}\right) = \frac{H/2}{f_y}
+\quad\Longrightarrow\quad
+\boxed{f_y = \frac{H}{2\tan\!\left(\theta_h/2\right)}}.
+\end{equation}
+
+\begin{remark}
+If $\theta_w/W = \theta_h/H$ the pixels are square and $f_x = f_y$.
+Otherwise the camera has a non-unit pixel aspect ratio.
+\end{remark}
+
+\subsubsection{Principal point}
+The optical axis intersects the sensor at its centre, called the
+\emph{principal point}:
+
+\begin{equation}
+c_x = \frac{W}{2}, \qquad c_y = \frac{H}{2}.
+\end{equation}
+
+\subsubsection{Intrinsic matrix}
+The four intrinsic parameters are assembled into the $3\times 3$ upper
+triangular matrix:
+
+\begin{equation}
+K =
+\begin{pmatrix}
+f_x & 0   & c_x \\
+0   & f_y & c_y \\
+0   & 0   & 1
+\end{pmatrix}.
+\label{eq:K}
+\end{equation}
+
+\subsubsection{Projection equation}
+A 3-D point $\mathbf{q} = (q_x, q_y, q_z)^\top$ in the remote frame
+$\mathcal{R}$ projects onto raw pixel coordinates via:
+
+\begin{equation}
+\begin{pmatrix} u^{\text{raw}} \\ v^{\text{raw}} \\ 1 \end{pmatrix}
+\;\sim\;
+K\,\begin{pmatrix} q_x/q_z \\ q_y/q_z \\ 1 \end{pmatrix},
+\end{equation}
+
+which gives explicitly:
+
+\begin{equation}
+u^{\text{raw}} = f_x\,\frac{q_x}{q_z} + c_x,
+\qquad
+v^{\text{raw}} = f_y\,\frac{q_y}{q_z} + c_y.
+\label{eq:proj}
+\end{equation}
+
+\subsubsection{Back-projection: pixel to ray direction}
+Inverting \eqref{eq:proj}, a raw pixel $(u^{\text{raw}}, v^{\text{raw}})$
+defines a \emph{ray direction} in $\mathcal{R}$. Since $K$ is upper
+triangular its inverse is:
+
+\begin{equation}
+K^{-1} =
+\begin{pmatrix}
+1/f_x & 0     & -c_x/f_x \\
+0     & 1/f_y & -c_y/f_y \\
+0     & 0     & 1
+\end{pmatrix}.
+\end{equation}
+
+The normalised (homogeneous) direction vector for observation $i$ is:
+
+\begin{equation}
+\mathbf{d}_i = K^{-1}
+\begin{pmatrix} u_i^{\text{raw}} \\ v_i^{\text{raw}} \\ 1 \end{pmatrix}
+=
+\begin{pmatrix}
+(u_i^{\text{raw}} - c_x)/f_x \\
+(v_i^{\text{raw}} - c_y)/f_y \\
+1
+\end{pmatrix}.
+\label{eq:di}
+\end{equation}
+
+The beacon $L_i$ lies somewhere along the ray
+$\{\,\lambda_i\,\mathbf{d}_i \mid \lambda_i > 0\,\}$ in frame $\mathcal{R}$.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{Step 3 — World-Space Ray Directions}
+
+\subsubsection{Rotating the camera-frame ray into the global frame}
+The back-projection \eqref{eq:di} gives the direction $\mathbf{d}_i$ of the
+ray towards beacon $L_i$ expressed in the remote frame $\mathcal{R}$.
+Rotating it into the global frame $\mathcal{O}$ with $\mathbf{R}$ yields the
+\emph{world-space ray direction}:
+
+\begin{equation}
+\mathbf{r}_i \;=\; \mathbf{R}\,\mathbf{d}_i \;\in\; \mathbb{R}^3.
+\label{eq:ri}
+\end{equation}
+
+$\mathbf{r}_i$ is fully known, depending only on the known rotation
+$\mathbf{R}$ and the observed pixel $\mathbf{d}_i$.
+
+\subsubsection{Ray constraint in the global frame}
+The beacon $L_i$ lies somewhere along the ray emanating from the camera
+origin $\mathbf{P}$ in direction $\mathbf{r}_i$. Expressed entirely in
+$\mathcal{O}$:
+
+\begin{equation}
+L_i - \mathbf{P} = \lambda_i\,\mathbf{r}_i, \qquad \lambda_i > 0.
+\label{eq:ray_constraint}
+\end{equation}
+
+Rearranging, the position satisfies:
+
+\begin{equation}
+\boxed{\mathbf{P} = L_i - \lambda_i\,\mathbf{r}_i, \qquad i = 1, 2.}
+\label{eq:P_from_lambda}
+\end{equation}
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{Step 4 — Linear System for the Depths $\lambda_1, \lambda_2$}
+
+\subsubsection{Equating the two position estimates}
+Equation \eqref{eq:P_from_lambda} written for $i=1$ and $i=2$ must give the
+same $\mathbf{P}$:
+
+\begin{equation}
+L_1 - \lambda_1\,\mathbf{r}_1 = L_2 - \lambda_2\,\mathbf{r}_2.
+\end{equation}
+
+Rearranging:
+
+\begin{equation}
+\lambda_1\,\mathbf{r}_1 - \lambda_2\,\mathbf{r}_2 = L_1 - L_2.
+\label{eq:sys}
+\end{equation}
+
+\subsubsection{Right-hand side}
+With $L_1 = (d,0,0)^\top$ and $L_2 = (-d,0,0)^\top$:
+
+\begin{equation}
+L_1 - L_2 = \begin{pmatrix} 2d \\ 0 \\ 0 \end{pmatrix}.
+\end{equation}
+
+\subsubsection{Matrix form}
+Writing $\mathbf{r}_i = (r_x^i,\, r_y^i,\, r_z^i)^\top$, equation
+\eqref{eq:sys} becomes:
+
+\begin{equation}
+\underbrace{
+\begin{pmatrix}
+r_x^1 & -r_x^2 \\
+r_y^1 & -r_y^2 \\
+r_z^1 & -r_z^2
+\end{pmatrix}
+}_{A\;\in\;\mathbb{R}^{3\times 2}}
+\begin{pmatrix} \lambda_1 \\ \lambda_2 \end{pmatrix}
+=
+\begin{pmatrix} 2d \\ 0 \\ 0 \end{pmatrix}.
+\label{eq:linear_system}
+\end{equation}
+
+\subsubsection{Least-squares solution}
+System \eqref{eq:linear_system} is \emph{overdetermined} (3 equations,
+2 unknowns). The least-squares solution minimises
+$\|A\boldsymbol{\lambda} - \mathbf{b}\|^2$:
+
+\begin{equation}
+\begin{pmatrix} \lambda_1 \\ \lambda_2 \end{pmatrix}
+= (A^\top A)^{-1}\,A^\top\,\mathbf{b},
+\qquad \mathbf{b} = \begin{pmatrix} 2d \\ 0 \\ 0 \end{pmatrix}.
+\label{eq:lstsq}
+\end{equation}
+
+\paragraph{Explicit form of $A^\top A$}
+\begin{equation}
+A^\top A =
+\begin{pmatrix}
+\|\mathbf{r}_1\|^2 & -\mathbf{r}_1\cdot\mathbf{r}_2 \\
+-\mathbf{r}_1\cdot\mathbf{r}_2 & \|\mathbf{r}_2\|^2
+\end{pmatrix}.
+\end{equation}
+
+Its determinant is:
+\begin{equation}
+\det(A^\top A) = \|\mathbf{r}_1\|^2\|\mathbf{r}_2\|^2
+                - (\mathbf{r}_1\cdot\mathbf{r}_2)^2
+              = \|\mathbf{r}_1 \times \mathbf{r}_2\|^2.
+\end{equation}
+
+This vanishes if and only if $\mathbf{r}_1 \parallel \mathbf{r}_2$, i.e.\ the
+two beacons project onto the same pixel — a physically degenerate
+configuration.
+
+\paragraph{Explicit form of $A^\top \mathbf{b}$}
+\begin{equation}
+A^\top \mathbf{b} =
+\begin{pmatrix}
+2d\, r_x^1 \\ -2d\, r_x^2
+\end{pmatrix}.
+\end{equation}
+
+\paragraph{Closed-form solution}
+Let $\alpha = \|\mathbf{r}_1\|^2$, $\beta = \mathbf{r}_1\cdot\mathbf{r}_2$,
+$\gamma = \|\mathbf{r}_2\|^2$, $\delta = \alpha\gamma - \beta^2$. Then:
+
+\begin{equation}
+\boxed{
+\lambda_1 = \frac{2d}{\delta}\bigl(\gamma\, r_x^1 - \beta\, r_x^2\bigr),
+\qquad
+\lambda_2 = \frac{2d}{\delta}\bigl(\beta\, r_x^1 - \alpha\, r_x^2\bigr).
+}
+\label{eq:lambda_closed}
+\end{equation}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{Step 5 — Recovering the 3-D Position $\mathbf{P}$}
+
+\subsubsection{Individual estimates}
+From \eqref{eq:P_from_lambda}:
+\begin{align}
+\hat{\mathbf{P}}_1 &= L_1 - \lambda_1\,\mathbf{r}_1
+= \begin{pmatrix}d\\0\\0\end{pmatrix}
+- \lambda_1\,\mathbf{R}^\top\,\mathbf{d}_1, \\[6pt]
+\hat{\mathbf{P}}_2 &= L_2 - \lambda_2\,\mathbf{r}_2
+= \begin{pmatrix}-d\\0\\0\end{pmatrix}
+- \lambda_2\,\mathbf{R}^\top\,\mathbf{d}_2.
+\end{align}
+
+\subsubsection{Final estimate}
+In the noiseless case $\hat{\mathbf{P}}_1 = \hat{\mathbf{P}}_2$. With noise,
+the average minimises the residual:
+
+\begin{equation}
+\boxed{
+\mathbf{P} = \frac{\hat{\mathbf{P}}_1 + \hat{\mathbf{P}}_2}{2}.
+}
+\end{equation}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{Complete Algorithm}
+
+The full procedure is summarised below.
+
+\begin{enumerate}
+    \item \textbf{Build the rotation matrix.}
+    Compute $\mathbf{R} = R_z(\psi)\,R_y(\theta)\,R_x(\phi)$
+    using \eqref{eq:R}.
+
+    \item \textbf{Compute intrinsic parameters.}
+    \begin{equation*}
+    f_x = \frac{W}{2\tan(\theta_w/2)},\quad
+    f_y = \frac{H}{2\tan(\theta_h/2)},\quad
+    c_x = \frac{W}{2},\quad c_y = \frac{H}{2}.
+    \end{equation*}
+
+    \item \textbf{Back-project pixel observations.}
+    For $i = 1, 2$, compute $\mathbf{d}_i$ via \eqref{eq:di}.
+
+    \item \textbf{Rotate rays in world frame.}
+    $\mathbf{r}_i = \mathbf{R}\,\mathbf{d}_i$ (equation \eqref{eq:ri}).
+
+    \item \textbf{Solve for depths.}
+    Assemble $A$ from \eqref{eq:linear_system} and solve \eqref{eq:lstsq}
+    to obtain $\lambda_1, \lambda_2$. The closed form is \eqref{eq:lambda_closed}.
+
+    \item \textbf{Recover position.}
+    $\mathbf{P} = \tfrac{1}{2}(L_1 - \lambda_1\mathbf{r}_1
+                               + L_2 - \lambda_2\mathbf{r}_2)$.
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{Remarks and Edge Cases}
+
+\begin{remark}[Degeneracy]
+The system is degenerate when $\mathbf{r}_1 \parallel \mathbf{r}_2$
+($\delta = 0$). This happens only when the two beacons project onto
+identical pixels in the image, which is physically impossible if the bar is
+visible and the camera has finite resolution.
+\end{remark}
+
+\begin{remark}[Sign of $\lambda$]
+Both depths must be positive ($\lambda_i > 0$) for the beacons to be in
+front of the camera. A negative value indicates an inconsistent input
+(e.g.\ swapped beacon identities or an Euler-angle sign error).
+\end{remark}
+
+% \begin{remark}[Square pixels]
+% If $\theta_w / W = \theta_h / H$ then $f_x = f_y = f$ and the model reduces
+% to the original single-parameter model with direction vectors
+% $\mathbf{d}_i = ((u_i - c_x)/f,\; (v_i - c_y)/f,\; 1)^\top$.
+% \end{remark}
+
+% \begin{remark}[Noise robustness]
+% The least-squares formulation in Step 4 automatically distributes pixel noise
+% across all three coordinate equations. For higher accuracy under significant
+% noise, one can iterate using the Gauss–Newton method on the full non-linear
+% reprojection error.
+% \end{remark}
+
 \end{document}
+
