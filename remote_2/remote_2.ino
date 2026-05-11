@@ -7,18 +7,21 @@
 #include "Adafruit_BNO08x_RVC.h" // For using gyroscope
 #include <cstdlib> // For using rand()
 
+// these unique adresses are usued so the computer find the remote device connected to it
 #define REMOTE_SERVICE_UUID "c0990295-2b98-4df2-9338-6caf6bd6acce"
 #define REMOTE_CHARACTERISTIC_UUID "7bf3223d-0687-479f-80b0-5b4a4c6df558"
 
-#define LED_DISTANCE_MM 200.0f
-#define NOTIFY_INTERVAL_MS 10 // 10ms interval -> 100Hz
+#define LED_DISTANCE_MM 200.0f // two IR LEDs near the screen are 200 millimeters apart
+//remote sends cursor data to the computer every 10 milliseconds,
+#define NOTIFY_INTERVAL_MS 10 // 10ms interval -> 100Hz //
 
-#define BUTTON_A_PIN 7
-#define BUTTON_B_PIN 9
+#define BUTTON_A_PIN 7   // "Action" button — reported in the BLE payload
+#define BUTTON_B_PIN 9   // "Reset" button  — resets the gyroscope zero reference
 
 // === Mathematics types =====================================================
-
-typedef float vec3[3];
+//simple renaming for the later use.
+typedef float vec3[3]; 
+// this vector holds X,Y,Z coordinates in the real world and the position with respect to the LEDs
 typedef float mat3[3][3];
 
 bool PRINT_FLAG = false;
@@ -26,21 +29,26 @@ bool PRINT_FLAG = false;
 // === Board state =============================================================
 
 struct BoardState {
-  bool computerConnected = false;
-  vec3 pos = { 0,0,0 };
-  vec3 ray = { 0,0,0 };
-  float pitch = 0;
+  bool  computerConnected = false; // True while a BLE central (PC) is connected
+  vec3  pos = {0, 0, 0};          // 3-D position of the remote camera in the global frame (mm)
+  vec3  ray = {0, 0, 0};          // the direction the remote is pointing (global frame)
+  //x axis is actually paralel to the edge of the screen or laptop and pitch is calulated basedo n this axis
+  //y is the prependicular to the screen 
+  float pitch = 0;                 // Current pitch angle (deg) — sent as the "roll" of the cursor
 } boardState;
 
 
 // === Payloads =============================================================
-
+// Raw Euler angles coming out of the BNO085, after subtracting the calibration
+// offset so that the "resting" orientation reads as (0, 0, 0).
 struct GyroscopePayload {
   float pitch = 0;
   float roll = 0;
   float yaw = 0;
 } gyroscopePayload;
 
+// Raw Euler angles coming out of the BNO085, after subtracting the calibration
+// offset so that the "resting" orientation reads as (0, 0, 0).
 struct GyroscopeOffset {
   float pitch = 0;
   float roll  = 0;
@@ -48,6 +56,9 @@ struct GyroscopeOffset {
 } gyroscopeOffset;
 
 struct IRCameraPayload {
+  //x1, y1 → pixel position of the first LED in the camera image
+// x2, y2 → pixel position of the second LED in the camera image
+// cordinates of the LEDs with respect to the camera
   int x1 = 0;
   int y1 = 0;
   int x2 = 0;
@@ -163,6 +174,13 @@ bool localise_remote(
   To make the difference between those two rays, the simplest way is to look at the x coordonate: it is always smaller on the remote->L1 ray.
   So we permute our r1/r2 variables values if it is not the case.
   */
+
+  /*
+The math requires r1 = ray to RIGHT led (d,0,0) and r2 = ray to LEFT led (-d,0,0).
+The camera gives the two LEDs in random order, so we check:
+the ray pointing to the right LED always has a larger X value.
+If r1 has a smaller X than r2, they are swapped — fix it.
+*/
   if (r1[0] < r2[0]) {
     vec3 tmp;
     memcpy(tmp, r1, sizeof(vec3));
@@ -245,7 +263,7 @@ void setupButtons() {
 }
 
 // === IR Camera =======================================================
-
+//this part turns on and configure the camera
 int IRsensorAddress = 0xB0;
 //int IRsensorAddress = 0x58;
 int slaveAddress = IRsensorAddress >> 1;
@@ -274,6 +292,12 @@ void setupIRCamera() {
 }
 
 bool readIRCamera(IRCameraPayload& out) {
+/*
+Asks the camera for its latest data
+Receives 16 bytes of raw data back
+Extracts the pixel coordinates of up to 4 detected IR spots from those bytes
+Sorts the two LEDs left and right so x1/y1 is always the right LED and x2/y2 is always the left one
+Returns false if either LED is not detected (coordinates = 1023 means "not found")*/
   //IR sensor read
   Wire.beginTransmission(slaveAddress);
   Wire.write(0x36);
@@ -337,9 +361,16 @@ bool readIRCamera(IRCameraPayload& out) {
 
   if (Iy[0] == 1023 || Ix[0] == 1023 || Iy[1] == 1023 || Ix[1] == 1023) return false;
   return true;
+  /*When the LEDs are not detected and readIRCamera() returns false
+  the boardState.pos and boardState.ray just keep their old values from the previous 
+  cycle when the LEDs WERE detected. 
+  So the cursor position sent to the computer is simply the last known position.
+  */
 }
 
 // === Gyroscope (BNO085x) =============================================================
+// at this section we are calculating that at which direction the gyroscope is pointing. because for determining
+//the exact position of the cursor the pixel coordinates are not enough
 
 #define BNO_RX 4  // ESP32-S3 pin connected to BNO08x TX
 #define BNO_TX 5  // ESP32-S3 pin connected to BNO08x RX (optional, RVC is one direction only)
@@ -405,7 +436,7 @@ class ComputerCallback: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     Serial.printf("[Remote]: Computer connected\n");
     boardState.computerConnected = true;
-    turnLedOn();
+    turnLedOn();   //Turns LED white
   }
   
   void onDisconnect(BLEServer* pServer) {
@@ -449,27 +480,44 @@ void setupRemoteBluetooth() {
 }
 
 // === Cursor calculations =================================================
+/*
+Performs remote localisation using the current sensor data.
+Updates boardState position, viewing ray, and pitch values.
+Gyro measurements are converted from degrees to radians before processing.
+Returns true on success; otherwise false which shows the frame should not be sent.
+*/
 
 bool updateBoardState(
-  const GyroscopePayload& gyro,
-  const IRCameraPayload& ir,
-  BoardState& state)
+  const GyroscopePayload&gyro,
+  const IRCameraPayload&ir,
+  BoardState&state)
 {
   if (!localise_remote(
-    gyro.yaw*3.1415/180.0f, gyro.pitch*3.1415/180.0f, gyro.roll*3.1415/180.0f,
-    ir.x1, ir.y1, ir.x2, ir.y2,
-    LED_DISTANCE_MM/2,
-    irCameraPayload,
-    state.pos,
-    state.ray
-  )) return false;
+        gyro.yaw   * 3.1415f / 180.0f,   // yaw =>rad
+        gyro.pitch * 3.1415f / 180.0f,   // pitch => rad
+        gyro.roll  * 3.1415f / 180.0f,   // roll =>rad
+        ir.x1, ir.y1, ir.x2, ir.y2,      // pixel coordinates of the two LEDs
+        LED_DISTANCE_MM / 2,              //half the physical LED spacing (100 mm)
+        irCameraPayload,                  // camera intrinsics
+        state.pos,                        // 3-D position of the remote (mm)
+        state.ray                         // pointing direction
+      )) return false;
 
-  state.pitch = gyro.pitch;
-
+  state.pitch = gyro.pitch; // Store pitch so it can be sent as cursor "roll"
   return true;
 }
 
+// Convert the 3-D boardState (position + pointing ray) into a 2-D cursor
+// position by intersecting the ray with the screen plane (Y = 0 in world frame).
+//
+// The screen plane is defined as Y = 0.  The parametric ray is:
+//   P(t) = pos + t · ray
+// Setting P_y(t) = 0 gives t = -pos[1] / ray[1].
+// Substituting back gives the screen intersection point (X and Z components).
+//
+// All position values are stored as int32_t (mm × 100) for two decimal places.
 void assembleCursorPayload(const BoardState& state, const uint8_t missMask, CursorPayload& out) {
+  /*takes the 3D position and converts it into a 2D cursor position on screen.*/
   float t = -state.pos[1] / state.ray[1];
   out.x = (int32_t)((state.pos[0] + t * state.ray[0]) * 100);
   out.y = (int32_t)((state.pos[2] + t * state.ray[2]) * 100);
@@ -485,7 +533,9 @@ void assembleCursorPayload(const BoardState& state, const uint8_t missMask, Curs
 
   out.missMask = missMask;
 }
-
+// Pack the CursorPayload struct into the BLE characteristic and push a NOTIFY
+// to any connected central device.  Safe to call even with no connection
+// (the null check prevents a crash).
 void notifyComputer() {
   if (pRemoteCharacteristic != nullptr) {
     pRemoteCharacteristic->setValue((uint8_t*)&cursorPayload, sizeof(cursorPayload));
@@ -494,7 +544,9 @@ void notifyComputer() {
 }
 
 // === Orchestration =============================================
-
+// this section Counts how many times we have called resetGyroscope() at boot.
+// We force 10 automatic resets during the first 10 cycles so the gyro zeros
+// itself on whatever orientation the remote happens to be in at power-on.
 int did_init = 0;
 
 void setup() {
@@ -537,7 +589,7 @@ void loop() {
 
     MISS_MASK = 0;
 
-    if(!readGyroscope(gyroscopePayload)) MISS_MASK += 0b1;
+    if(!readGyroscope(gyroscopePayload)) MISS_MASK += 0b1;  //MISS_MASK += 0b001;  // gyroscope failed --slot 1
     
     // Reset gyroscope origin when button B is pressed
     if (digitalRead(BUTTON_B_PIN) || did_init < 10) {
@@ -545,9 +597,9 @@ void loop() {
       resetGyroscope(gyroscopePayload, gyroscopeOffset);
     }
     
-    if(!readIRCamera(irCameraPayload)) MISS_MASK += 0b10;
+    if(!readIRCamera(irCameraPayload)) MISS_MASK += 0b10; // One or both LEDs missing; skip
 
-    if (!updateBoardState(gyroscopePayload, irCameraPayload, boardState)) MISS_MASK += 0b100;
+    if (!updateBoardState(gyroscopePayload, irCameraPayload, boardState)) MISS_MASK += 0b100; //Run 3D localisatio
 
     if (PRINT_FLAG) {
       Serial.printf("Gyro: pitch %f,  roll %f, yaw %f\n", gyroscopePayload.pitch, gyroscopePayload.roll, gyroscopePayload.yaw);
@@ -556,6 +608,8 @@ void loop() {
       Serial.printf("Ray: %f, %f, %f\n", boardState.ray[0], boardState.ray[1], boardState.ray[2]);
     }
 
+    // --- 6. Pack and send the BLE payload -----------------------------------
+    // sensorMask 0b00000111 = all three sensors (gyro + IR + computation) valid
     assembleCursorPayload(boardState, MISS_MASK, cursorPayload);
     notifyComputer();
 
