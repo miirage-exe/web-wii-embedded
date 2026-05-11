@@ -570,6 +570,7 @@ first bit: missed gyroscope data
 second bit: IR camera missed one (or both) IR led
 third bit: missed computation (negative lambda or parallel rays)
 */
+// Reset error flag at the start of every cycle — assume everything will work
 int MISS_MASK = 0;
 
 void loop() {
@@ -599,7 +600,7 @@ void loop() {
     
     if(!readIRCamera(irCameraPayload)) MISS_MASK += 0b10; // One or both LEDs missing; skip
 
-    if (!updateBoardState(gyroscopePayload, irCameraPayload, boardState)) MISS_MASK += 0b100; //Run 3D localisatio
+    if (!updateBoardState(gyroscopePayload, irCameraPayload, boardState)) MISS_MASK += 0b100; //math failed → bit 3 ON
 
     if (PRINT_FLAG) {
       Serial.printf("Gyro: pitch %f,  roll %f, yaw %f\n", gyroscopePayload.pitch, gyroscopePayload.roll, gyroscopePayload.yaw);
@@ -611,7 +612,7 @@ void loop() {
     // --- 6. Pack and send the BLE payload -----------------------------------
     // sensorMask 0b00000111 = all three sensors (gyro + IR + computation) valid
     assembleCursorPayload(boardState, MISS_MASK, cursorPayload);
-    notifyComputer();
+    notifyComputer(); // push cursor data to computer via BLE NOTIFY 
 
     PRINT_FLAG = false;
 
