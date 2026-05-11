@@ -67,7 +67,7 @@ This report describes the system architecture, hardware design, sensor modelling
 
 \subsection{The Original Wii Remote}
 
-The Nintendo Wii Remote achieves its pointing and motion-sensing capabilities through two complementary subsystems: an infrared optical system and an accelerometer.
+The Nintendo Wii Remote achieves its pointing and motion-sensing capabilities through two complementary subsystems: an infrared camera and an accelerometer.
 
 \paragraph{IR-based pointing.}
 The \textit{sensor bar} bundled with the Wii console is entirely passive: it contains a pair of infrared LEDs at each end of a $\sim$20\,cm bar and transmits no data~\cite{wiibrew}. All sensing occurs inside the remote, which contains a forward-facing IR camera. This camera detects up to four IR sources and outputs their 2D image-plane coordinates directly~\cite{wiibrew}. From the known physical separation of the two LED clusters, the console software infers where the remote is pointing on screen. The sensor bar is nothing more than a pair of fixed IR beacons: any two IR LEDs at a known separation can serve as a functional substitute.
@@ -76,20 +76,31 @@ The \textit{sensor bar} bundled with the Wii console is entirely passive: it con
 The original Wii Remote included a 3-axis accelerometer for gesture and tilt sensing, but lacked independent rotational tracking. This was addressed in 2009 with the Wii\,MotionPlus accessory, which added a multi-axis MEMS gyroscope~\cite{motionplus_wiki}. 
 
 \paragraph{Relevance to this project.}
-This project mostly mirrors the same architecture: two fixed IR LEDs replace the sensor bar, and the remote's IR camera tracks them to derive cursor coordinates. Anyway, for this project, we decided to use a IMU that combines accelerometer and gyroscope data to give a ready-to-use orientation data, since our goal is to just have a point device, and not detect any shaking or other user movement, having directly the orientation of the remote makes the computation of the cursor position easier.
+This project mostly mirrors the same architecture: two fixed IR LEDs replace the sensor bar, and the remote's IR camera tracks them to derive cursor coordinates. Anyway, for this project, we decided to use a IMU that combines accelerometer and gyroscope data to give a ready-to-use orientation data, since our goal is to just have a pointing device, and not detect any shaking or other user movement. Thereofre having directly the orientation of the remote makes the computation of the cursor position easier.
 
 \subsection{Bluetooth Low Energy (BLE)}
 
-% TODO: Explain the GATT model, notifications vs. polling, and that notifications has be prefered.
-% Explain why BLE was chosen over Wi-Fi for this application (latency, power).
+BLE organises data exchange around the \textit{Generic Attribute Profile} (GATT) model. A \textit{peripheral} device exposes one or more \textit{services}, each containing one or more \textit{characteristics}. A \textit{central} device (here, the browser running on the PC) can read, write, or subscribe to those characteristics. In this project the remote acts as the peripheral, advertising a single service with one characteristic that carries the cursor packet.
+
+Two transfer modes are available for characteristics. In \textit{polling}, the central explicitly reads the characteristic at whatever rate it chooses. With \textit{notifications}, the peripheral pushes an updated value to all subscribed centrals as soon as it is ready. Notifications were preferred here: they invert the flow of control so the remote drives the update rate, and deliver data at the sensor cadence without requiring the central to time its reads precisely, allowing a future potential implementation of a \textit{sleep mode} (not implemented in the scope of this project).
+
+BLE was chosen over Wi-Fi for two practical reasons. First, BLE introduces lower and more predictable per-packet latency, which is important for a real-time pointing device. Second, BLE consumes significantly less power than Wi-Fi, a relevant constraint for a battery-powered handheld unit.
 
 \subsection{Inertial Measurement Units and Sensor Fusion}
 
-% TODO: Explain IMU basics (accelerometer, gyroscope, magnetometer).
-% Explain what sensor fusion is and mention the Kalman/complementary filter,
-% and why the BNO085's onboard fusion removes the need to implement one manually.
+An \textit{Inertial Measurement Unit} (IMU) is a device that measures the forces and rotational rates acting on a rigid body. A typical IMU combines an \textit{accelerometer}, which measures linear acceleration along three axes, a \textit{gyroscope}, which measures angular velocity around three axes, and optionally a \textit{magnetometer}, which measures the local magnetic field to provide an absolute heading reference.
+
+Raw data from each sensor is individually imperfect: accelerometers are noisy and sensitive to vibration, while gyroscopes suffer from drift as integration errors accumulate over time. \textit{Sensor fusion} combines both sources to produce an orientation estimate that is more accurate and stable than either alone.
+
+The BNO085 used in this project integrates all three sensor types on a single chip and runs its own fusion algorithm in dedicated hardware~\cite{bno085}. It exposes the final orientation directly as Euler angles (yaw, pitch, roll) at 100\,Hz. This removes the need to implement a fusion filter manually and simplifies the firmware to a single serial read per cycle.
 
 \subsection{IR-Based Pointing and Perspective Projection}
+
+The pointing subsystem relies on a passive reference bar containing two IR LEDs separated by a fixed distance of 200\,mm, placed on top of the screen. The remote's onboard IR camera (DFRobot SEN0158) detects up to four IR sources and reports their pixel coordinates over I2C~\cite{ir_camera}. In normal operation, only the two reference LEDs are visible, so only the first two reported points are used.
+
+The camera operates at a resolution of $1024 \times 768$\,px with a horizontal field of view of $33\deg$ and a vertical field of view of $23\deg$. Because in our case the camera is mounted sideways in the remote, its width and height axes are physically swapped relative to the world orientation; the firmware accounts for this by exchanging the $W$ and $H$ parameters, and the $x$ and $y$ values of any sensor read (see after).
+
+The 2-D pixel observations are converted into a 3-D cursor position through a perspective back-projection, detailed in Annex~\ref{annex:localisation}. Each observed pixel $(u_i, v_i)$ defines a ray direction $\mathbf{d}_i$ in the camera frame, which is rotated into the global frame using the IMU orientation. The 3-D position of the remote is then recovered by finding the point best consistent with both observed pixels. The 2-D cursor coordinates are finally obtained by intersecting the remote's pointing ray with the screen plane, defined as $Y = 0$ in the global frame.
 
 
 \section{Description}
@@ -120,7 +131,7 @@ Figure~\ref{fig:architecture} shows the overall system block diagram.
 
 
 
-\subsection{Hardware Design}
+% \subsection{Hardware Design}
 
 
 
@@ -132,7 +143,7 @@ from two pieces of information: the IMU orientation and the pixel coordinates
 of the two IR beacons observed by the on-board camera.
 
 The IR camera back-projects each observed pixel $(u_i, v_i)$ into a ray
-direction $\mathbf{d}_i$ in the camera frame using the pinhole model and the
+direction $\mathbf{d}_i$ in the camera frame using the
 known camera intrinsics (focal lengths $f_x$, $f_y$ derived from the sensor's
 field of view). Each ray is then rotated into the global frame using the
 rotation matrix $\mathbf{R}$ built from the IMU's yaw, pitch and roll:
@@ -142,8 +153,8 @@ rotation matrix $\mathbf{R}$ built from the IMU's yaw, pitch and roll:
 
 Since each beacon $L_i$ must lie along its corresponding ray, the remote's
 position satisfies $\mathbf{P} = L_i - \lambda_i\,\mathbf{r}_i$ for some
-scalar depth $\lambda_i > 0$. Equating the two expressions for $\mathbf{P}$
-yields an overdetermined $3 \times 2$ linear system in $(\lambda_1, \lambda_2)$,
+scalar depth $\lambda_i > 0$. Solving the equation of the two expressions for $\mathbf{P}$
+leads to an overdetermined $3 \times 2$ linear system in $(\lambda_1, \lambda_2)$,
 which is solved in closed form by least squares. The final position estimate is:
 \begin{equation}
     \mathbf{P} = \frac{1}{2}\bigl[
@@ -169,32 +180,54 @@ struct RemotePacket {
 };                       // Total: 14 bytes
 \end{lstlisting}
 
-
+% TODO: explain why we used 32bit int: mainly for readability (for both x/y and pitch).
 
 \subsection{Firmware Design}
 
-% TODO: Describe the remote board firmware:
-%   - Initialization and configuration of the BNO085 (UART RVC mode)
-%   - Reading and parsing of the IR camera (SEN0158) over I2C
-%   - Button GPIO reading and bitmask encoding
-%   - Packet construction and BLE notification at ~100 Hz
-%   - Task scheduling / loop timing to hit the target frequency
-%
-% BLE peripheral setup:
-%   - GATT service and characteristic definition
-%   - Advertising configuration
-%   - Notification logic
-%
-% Note: packet structure is already covered in §2.4, do not repeat it here.
+The remote firmware was written in C++ with Arduino IDE. It follows a straightforward loop: read the IMU, read the IR camera, read the buttons, compute the cursor position, and push a BLE notification (all within a 10\,ms window to sustain the 100\,Hz target rate). Each hardware peripheral is encapsulated in its own initialisation and read function, keeping the main loop compact.
 
-\section{Experimental Results and Testing}
+\paragraph{BNO085 initialisation and reading.}
+The BNO085 is operated in its UART~RVC (Raw Vector Continuous) mode. Although the sensor exposes an I2C interface, its datasheet notes that it is not compatible with the I2C specification~\cite{bno085}, which caused compatibility issues with the ESP32-S3. The UART protocol was used instead. More specificatlly UART-RVC was preferred because this the board only needs to \textit{receive} orientation data from the sensor (nothing needs to be sent back). UART~RVC is designed precisely for this case, reducing the firmware interaction to a single read per cycle. The \texttt{Adafruit\_BNO08x\_RVC} library handles frame synchronisation and parsing over a dedicated hardware UART (Serial1, 115200\,baud, pins 4 and 5).
 
-\section{Discussion and Conclusion}
+In consequence, because the BNO085 transmits frames continuously (and asynchronously), a read attempt may catch the UART buffer mid-frame. If the first \texttt{rvc.read()} call fails, the firmware waits 3\,ms, and retries once before declaring the reading as missed.
+
+A calibration offset is maintained for each axis. On every read, the raw Euler angles output by the sensor are corrected by subtracted by the offset, so that the resting orientation of the remote reads as $(0, 0, 0)$ (pointing toward the center of the screen). The offset is updated whenever the user presses button~B, capturing the current orientation as the new zero reference. Additionally, the firmware forces ten automatic resets during the first ten loop cycles at power-on, so the remote self-calibrates to whatever orientation it happens to be held in at start-up (ideally pointing to the center of the screen).
+
+\paragraph{IR camera initialisation and reading.}
+The DFRobot SEN0158 IR positioning camera is connected over I\textsuperscript{2}C at address \texttt{0x58} (shifted from the raw sensor address \texttt{0xB0}). On the board the camera is connected to the sefault SDA and SCL port. Initialisation consists of writing a fixed six-register sequence that configures the camera's sensitivity and output format, as specified in the datasheet~\cite{ir_camera}.
+
+Each read requests 16 bytes from register \texttt{0x36}. The camera encodes the pixel coordinates of up to four detected IR sources across those bytes, with two upper bits of each coordinate packed into a shared status byte. A coordinate value of 1023 signals that the corresponding source was not detected; if either of the first two spots reports this default value, the read is declared as missed and the firmware retains the last valid position.
+
+Because the camera is mounted sideways in the remote enclosure, its reported $x$ and $y$axes are physically transposed relative to the world frame. The firmware corrects this by swapping the pixel components before writing them into the sensor payload.
+
+\paragraph{Button reading and encoding.}
+Two push-buttons are connected to GPIO pins~7 and~9 and configured as digital inputs. Button~A (pin~7) is the action button: its state is read each cycle and encoded into bit~0 of the \texttt{buttonMask} byte included in the BLE payload. Button~B (pin~9) is a reset button that triggers a gyroscope origin reset when held; it is not forwarded to the host.
+
+\paragraph{BLE peripheral setup.}
+The ESP32 is configured as a BLE peripheral under the device name \texttt{WiiRemote}. A single GATT service is created with one characteristic that carries the cursor payload; the characteristic is declared with the \texttt{READ}, \texttt{WRITE} and \texttt{NOTIFY} properties, enabling the web client to subscribe to updates. Two custom 128-bit UUIDs identify the service and characteristic, ensuring the browser-side Web Bluetooth connection request can uniquely target the remote.
+
+A server callback handles connection events. On connect, the \texttt{computerConnected} flag is set and the status LED turns white. On disconnect, the flag is cleared and BLE advertising is restarted after a 1\,s debounce delay, making the remote immediately discoverable again without requiring a reboot.
+
+\paragraph{Cursor computation.}
+Once the sensor readings are available, the firmware calls \texttt{localise\_remote()}, which converts the IMU Euler angles (degrees to radians) and the two IR pixel pairs into a 3-D position vector and a pointing-direction ray in the global frame, following the algorithm described in Annex~\ref{annex:localisation}. If the computation fails (either because the two rays are nearly parallel ($\delta < 10^{-9}$) or because one of the recovered depths $\lambda_i$ is negative) the function returns \texttt{false} and bit~2 of the miss mask is set.
+
+\begin{remark}[Axis assignment in the firmware]
+The physical mounting of the BNO085 on the remote imposes an axis assignment that differs from the convention defined in Annex~\ref{annex:localisation}: $Y$ serves as the depth axis where the appendix uses $Z$, and $Z$ is the vertical axis where the appendix uses $Y$. The localisation algorithm is otherwise identical; only the axis labels differ.
+\end{remark}
+
+The 3-D position is then projected onto the screen plane ($Y = 0$ in the global frame) by ray casting: the parameter $t = -p_y / r_y$ gives the intersection, and the cursor coordinates follow as $(p_x + t\,r_x,\; p_z + t\,r_z)$. Both coordinates and the pitch angle are scaled by a factor of 100 and stored as \texttt{int32\_t}, providing two decimal places of precision while avoiding floating-point in the BLE payload.
+
+\paragraph{Main loop and timing.}
+The loop is driven by a \texttt{millis()} timer that fires every \texttt{NOTIFY\_INTERVAL\_MS}\,$= 10$\,ms ($\approx$100\,Hz). Within each tick, the firmware executes the pipeline in order: read the gyroscope, optionally reset the gyroscope origin, read the IR camera, update the board state, assemble the cursor payload, and push a BLE notification.
+
+Failures at each stage are tracked through a three-bit \texttt{MISS\_MASK}: bit~0 signals a missed IMU frame, bit~1 a missing IR beacon, and bit~2 a failed localisation. The mask is included in every BLE packet so the host can distinguish invalid cursor computations from valid ones. The onboard NeoPixel LED also reflects the mask: it turns off for any non-zero value and returns to its normal colour when all three stages succeed. A debug dump of all intermediate values is printed to the serial monitor once per second.
+
+\section{Experimental Results and Conclusion}
 
 \subsection{Limitations and Trade-offs}
 
 \paragraph{IR LED emission angle.}
-The IR LEDs used on the reference device have a narrow emission cone of approximately 20°. When the remote is pointed too far off-axis relative to the reference bar, the IR camera loses sight of one or both beacons, causing cursor tracking to fail. This is not a fundamental limitation of the pointing algorithm but rather a consequence of the specific LEDs chosen. Substituting wider-angle IR emitters would directly extend the usable pointing range without any firmware change.
+The IR LEDs used on the reference device have a narrow emission cone of approximately 20°. When the remote is pointed too far off-axis relative to the reference bar, the IR camera loses track of one or both beacons, causing cursor tracking to fail. This is not a fundamental limitation of the pointing algorithm but rather a consequence of the specific LEDs chosen. Replacing our current LEDS with wider-angle IR emitters would directly extend the usable pointing range without any software change.
 
 \paragraph{BNO085 sensor fusion inertia.}
 The BNO085 onboard fusion algorithm prioritises orientation stability over instantaneous responsiveness. In practice, this introduces a slight lag on fast rotational movements, making rapid gestures feel softly delayed on screen.
@@ -246,6 +279,7 @@ DFRobot, \textit{Gravity: IR Positioning Camera Datasheet}, 2025.
 
 \end{thebibliography}
 
+\newpage
 \appendix
 
 \section{3-D Localisation of the Remote}
@@ -286,6 +320,9 @@ Attached to the remote. Its origin coincides with the camera optical centre
 $\mathbf{P}$; its axes are the global axes rotated by the known Euler angles.
 All camera-model equations hold in this frame.
 \end{definition}
+
+\subsubsection{Axis convention}
+The global frame $\mathcal{O}$ is oriented as follows: $X$ runs horizontally along the reference bar (with $L_1$ on the positive side), $Y$ is the vertical axis pointing upward, and $Z$ is the depth axis pointing from the screen toward the remote. In particular, the screen plane is $Z = 0$ and the remote always sits at $Z > 0$.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \subsection{Step 1 — Rotation Matrix from Euler Angles}
