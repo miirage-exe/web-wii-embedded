@@ -7,6 +7,68 @@
 #include "Adafruit_BNO08x_RVC.h" // For using gyroscope
 #include <cstdlib> // For using rand()
 
+/*
+ * ============================================================
+ *  WiiRemote Firmware — Architecture Overview
+ * ============================================================
+ *
+ * The code is organised into the following sections:
+ *
+ *  1. CONFIGURATION
+ *     Constants and pin definitions used across the whole program
+ *     (BLE UUIDs, LED spacing, update rate, button pins).
+ *
+ *  2. DATA STRUCTURES
+ *     Simple structs that hold the state of each part of the system:
+ *     - BoardState : current 3D position, pointing ray, and pitch
+ *     - GyroscopePayload / GyroscopeOffset : raw and calibrated angles
+ *     - IRCameraPayload : pixel coordinates from the IR camera
+ *     - CursorPayload : the final 2D cursor data sent to the computer
+ *
+ *  3. MATHEMATICS
+ *     Helper functions for 3D geometry (matrix multiply, dot product,
+ *     rotation matrix). The main function here is localise_remote(),
+ *     which uses the gyroscope angles and the two IR LED pixel positions
+ *     to compute the 3D position of the remote in space.
+ *
+ *  4. NEOPIXEL (LED)
+ *     setup + helper functions to turn the status LED on or off,
+ *     and change its colour depending on the connection state.
+ *
+ *  5. BUTTONS
+ *     setup function for the two physical buttons:
+ *     Button A (action) and Button B (gyroscope reset).
+ *
+ *  6. IR CAMERA
+ *     setup + read function for the infrared camera (I2C).
+ *     The read function returns the pixel coordinates of the
+ *     two IR LEDs placed near the screen.
+ *
+ *  7. GYROSCOPE (BNO085)
+ *     setup + read function for the orientation sensor (UART).
+ *     Also includes a reset function that saves the current
+ *     orientation as the new zero reference.
+ *
+ *  8. BLUETOOTH (BLE)
+ *     setup and notify functions for the BLE server.
+ *     The remote advertises itself and sends cursor data
+ *     to a connected computer using BLE notifications.
+ *
+ *  9. CURSOR CALCULATION
+ *     updateBoardState() combines gyro and IR data to compute
+ *     the 3D position and pointing direction of the remote.
+ *     assembleCursorPayload() projects this 3D result onto the
+ *     screen plane to produce a final 2D cursor position.
+ *
+ * 10. ORCHESTRATION (setup / loop)
+ *     The standard Arduino entry points. setup() initialises all
+ *     components. loop() runs at a fixed rate (100 Hz), reads both
+ *     sensors, computes the cursor, and sends the result over BLE.
+ *     A MISS_MASK byte tracks which sensors failed in each cycle.
+ * ============================================================
+ */
+
+
 // these unique adresses are usued so the computer find the remote device connected to it
 #define REMOTE_SERVICE_UUID "c0990295-2b98-4df2-9338-6caf6bd6acce"
 #define REMOTE_CHARACTERISTIC_UUID "7bf3223d-0687-479f-80b0-5b4a4c6df558"
@@ -15,16 +77,16 @@
 //remote sends cursor data to the computer every 10 milliseconds,
 #define NOTIFY_INTERVAL_MS 10 // 10ms interval -> 100Hz //
 
-#define BUTTON_A_PIN 7   // "Action" button — reported in the BLE payload
-#define BUTTON_B_PIN 9   // "Reset" button  — resets the gyroscope zero reference
+#define BUTTON_A_PIN 7   // "Action" button - reported in the BLE payload
+#define BUTTON_B_PIN 9   // "Reset" button - resets the gyroscope zero reference
 
 // === Mathematics types =====================================================
-//simple renaming for the later use.
+
 typedef float vec3[3]; 
-// this vector holds X,Y,Z coordinates in the real world and the position with respect to the LEDs
+
 typedef float mat3[3][3];
 
-bool PRINT_FLAG = false;
+bool PRINT_FLAG = false; // Flag used for debugging. Trigger the prints of important variables values every 1 seconds.
 
 // === Board state =============================================================
 
@@ -32,9 +94,7 @@ struct BoardState {
   bool  computerConnected = false; // True while a BLE central (PC) is connected
   vec3  pos = {0, 0, 0};          // 3-D position of the remote camera in the global frame (mm)
   vec3  ray = {0, 0, 0};          // the direction the remote is pointing (global frame)
-  //x axis is actually paralel to the edge of the screen or laptop and pitch is calulated basedo n this axis
-  //y is the prependicular to the screen 
-  float pitch = 0;                 // Current pitch angle (deg) — sent as the "roll" of the cursor
+  float pitch = 0;                 // Current pitch angle (deg) - sent as the "roll" of the cursor
 } boardState;
 
 
@@ -171,7 +231,7 @@ bool localise_remote(
 
   /*
   For the calculation to be right, our "r1" ray must be the remote->L1(d,0,0) ray, not the remote->L2(-d,0,0) one.
-  To make the difference between those two rays, the simplest way is to look at the x coordonate: it is always smaller on the remote->L1 ray.
+  To make the difference between those two rays, the simplest way is to look at the x coordonate: it is always bigger on the remote->L1 ray.
   So we permute our r1/r2 variables values if it is not the case.
   */
 
@@ -179,7 +239,7 @@ bool localise_remote(
 The math requires r1 = ray to RIGHT led (d,0,0) and r2 = ray to LEFT led (-d,0,0).
 The camera gives the two LEDs in random order, so we check:
 the ray pointing to the right LED always has a larger X value.
-If r1 has a smaller X than r2, they are swapped — fix it.
+If r1 has a smaller X than r2, they are swapped.
 */
   if (r1[0] < r2[0]) {
     vec3 tmp;
@@ -296,8 +356,7 @@ bool readIRCamera(IRCameraPayload& out) {
 Asks the camera for its latest data
 Receives 16 bytes of raw data back
 Extracts the pixel coordinates of up to 4 detected IR spots from those bytes
-Sorts the two LEDs left and right so x1/y1 is always the right LED and x2/y2 is always the left one
-Returns false if either LED is not detected (coordinates = 1023 means "not found")*/
+*/
   //IR sensor read
   Wire.beginTransmission(slaveAddress);
   Wire.write(0x36);
@@ -353,11 +412,10 @@ Returns false if either LED is not detected (coordinates = 1023 means "not found
   // }
   // Serial.println("");
   
-  int smallest_x = Iy[0] < Iy[1] ? 0 : 1;
-  out.x1 = Iy[1-smallest_x];
-  out.y1 = Ix[1-smallest_x];
-  out.x2 = Iy[smallest_x];
-  out.y2 = Ix[smallest_x];
+  out.x1 = Iy[0];
+  out.y1 = Ix[0];
+  out.x2 = Iy[1];
+  out.y2 = Ix[1];
 
   if (Iy[0] == 1023 || Ix[0] == 1023 || Iy[1] == 1023 || Ix[1] == 1023) return false;
   return true;
@@ -403,7 +461,6 @@ void setupGyroscope() {
 bool readGyroscope(GyroscopePayload& out) {
   BNO08x_RVC_Data heading;
   
-  // To understand why this double-check: https://claude.ai/share/e2369bef-e1bb-41e0-90b9-f1987f1cefd1
   if (!rvc.read(&heading)) { // If the sensor is still transmitting data to the ESP32 buffer, we may have to wait for the end of the transmission.
     delay(3); // wait for frame to finish transmitting (~1.65ms)
     if (!rvc.read(&heading)) return false; // Here, we are almost sure that the buffer is just empty/not at the right format.
