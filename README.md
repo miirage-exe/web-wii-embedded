@@ -1,6 +1,2 @@
-
-Gyroscope:
-https://www.digikey.be/fr/products/detail/adafruit-industries-llc/4754/13426653
-
-IR camera:
-https://www.digikey.be/fr/products/detail/dfrobot/SEN0158/7087147
+The website used in this project can be reached at https://web-wii.couseran.fr, and is hosted on an OVH VPS.
+The source code of this website can be seen at: https://github.com/miirage-exe/web-wii-app
